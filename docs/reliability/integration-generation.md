@@ -1,6 +1,7 @@
 # Integration generation and isolated merge observations
 
-Status: implementation checkpoint; focused and full validation pending.
+Status: implementation checkpoint; first focused run found and corrected a
+restart serialization mismatch. Post-correction validation is pending.
 
 An evaluation first commits a new generation with both readiness flags false.
 It captures the current task, session and workspace binding, rather than using
@@ -26,6 +27,10 @@ probe instead of executing user merge commands or silently accepting a different
 policy. A future merge executor must enforce the same policy and exact OID pair.
 The temporary merge-tree OID is not promised to remain available after cleanup.
 
+Source observations disable the optional filesystem-monitor helper and reject
+configured clean/process filters before inspecting worktree status. Neither a
+read-only observation nor merge simulation should launch those user helpers.
+
 Git inputs are observed again before the database commit. This detects movement
 during the probe, but does not lock an arbitrary external Git writer after the
 last observation. `checkedAt`, the OID pair and generation identify a historical
@@ -44,3 +49,16 @@ same-line, rename/delete, delete/modify, binary and clean merges; untouched inde
 and ref checks; task/session/binding/target/candidate/review barriers; event lookup
 past 501 later observations; and conservative custom-driver rejection. Barrier
 tests are not real process-kill or browser E2E acceptance.
+
+## A1/A2 tool block during the current continuation
+
+`DevSpace_Local（固定域名）.apply_patch` rejected the proposed validation-journal
+patch with: `因 OpenAI 无法确定请求的安全状态，已拦截此工具调用。`
+The proposed migration and journal were not written. Earlier uncommitted
+observer scaffolding was removed; `src/process-sessions.ts` and
+`src/db/migrations.ts` were verified unchanged from the remote base. The blocked
+action was not retried using another tool, path, encoding or shell route.
+
+This is a tooling block, not a passing implementation or a new permission grant.
+A1/A2 remain unimplemented, A remains PARTIAL, and E cannot be declared ready.
+Independent UI, diagnostics and acceptance/security inventory work may continue.

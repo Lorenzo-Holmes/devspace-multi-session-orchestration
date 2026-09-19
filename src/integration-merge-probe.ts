@@ -51,7 +51,7 @@ function environment(isolated = false): NodeJS.ProcessEnv {
 }
 
 async function git(cwd: string, args: string[], env = environment()): Promise<string> {
-  return (await exec("git", args, { cwd, env, timeout: 15_000, maxBuffer: 2 * 1024 * 1024 })).stdout.trim();
+  return (await exec("git", ["-c", "core.fsmonitor=false", ...args], { cwd, env, timeout: 15_000, maxBuffer: 2 * 1024 * 1024 })).stdout.trim();
 }
 
 function validRef(ref: string): void {
@@ -71,6 +71,11 @@ export async function observeMergeInputs(input: MergeProbeInput): Promise<MergeO
   validRef(input.targetRef);
   const candidateRoot = await directory(input.candidateRoot);
   const sourceRoot = await directory(input.sourceRoot);
+  for (const root of [candidateRoot, sourceRoot]) {
+    try {
+      if (await git(root, ["config", "--get-regexp", "^filter\\..*\\.(clean|process)$"])) throw new Error("unsupported_source_filter");
+    } catch (error) { if ((error as { code?: number }).code !== 1) throw error; }
+  }
   const commonDirectory = await realpath(await git(candidateRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
   const sourceCommon = await realpath(await git(sourceRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
   if (commonDirectory !== sourceCommon) throw new Error("foreign_repository");

@@ -137,13 +137,16 @@ export class IntegrationManager {
       };
       const readyReview = Object.entries(gates).filter(([key]) => key !== "reviewApproved").every(([, value]) => value);
       const now = new Date().toISOString();
-      return this.store.update<IntegrationRecord>("integration_records", { ...record, candidateCommit,
+      this.store.update<IntegrationRecord>("integration_records", { ...record, candidateCommit,
         targetCommit: observation?.targetOid, candidateTree: observation?.candidateTree, targetTree: observation?.targetTree,
         diffReady: probe.diffReady, gates, readyReview, mergeReady: readyReview && gates.reviewApproved,
         evaluationState: fresh ? "checked" : "stale", probeError: probe.errorCode,
         conflictState: fresh ? probe.conflictState : "unknown",
         integrationWorktreeState: !observation ? "missing" : clean ? "clean" : "dirty", checkedAt: now, updatedAt: now,
       }, record.revision);
+      // Return the persisted representation, including JSON's omission of
+      // undefined optional fields, so restart and immediate responses agree.
+      return this.get(project, id);
     });
   }
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFile, rename, unlink, readFile } from "node:fs/promises";
+import { writeFile, rename, unlink, readFile, access } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { IntegrationManager } from "./orchestration-integration.js";
@@ -116,4 +116,31 @@ test("custom merge commands are not executed by the isolated simulation", async 
   const result = await probeCandidateMerge({ candidateRoot: binding.worktreeRoot!, sourceRoot: f.project, candidateRef: "HEAD", targetRef: "HEAD" });
   assert.equal(result.conflictState, "unknown");
   assert.equal(result.errorCode, "unsupported_merge_policy");
+});
+
+for (const source of ["fsmonitor", "filter"] as const) {
+  test("merge observations do not execute repository " + source + " helpers", async t => {
+    const f = await v2Fixture(t), binding = await f.v2.bindings.provision(f.workspace, f.lease);
+    const marker = join(f.root, "unexpected-helper-execution"), script = join(f.root, "helper.cjs");
+    await writeFile(script, "require('node:fs').writeFileSync(" + JSON.stringify(marker) + ", 'executed'); process.exit(1);\n");
+    const command = '"' + process.execPath + '" "' + script + '"';
+    await exec("git", ["config", source === "fsmonitor" ? "core.fsmonitor" : "filter.custom.clean", command], { cwd: f.project });
+    const result = await probeCandidateMerge({ candidateRoot: binding.worktreeRoot!, sourceRoot: f.project, candidateRef: "HEAD", targetRef: "HEAD" });
+    assert.equal(result.conflictState, source === "filter" ? "unknown" : "clean");
+    assert.equal(await access(marker).then(() => true, () => false), false);
+  });
+}
+
+test("late project overlap is not hidden behind 1001 historical sessions", async t => {
+  const f = await v2Fixture(t), binding = await f.v2.bindings.provision(f.workspace, f.lease);
+  for (let index = 0; index < 1001; index++) {
+    f.sessions.register({ id: "history_" + String(index).padStart(5, "0"), projectKey: f.projectKey, workspaceRoot: f.project, state: "completed" });
+  }
+  const peer = f.sessions.register({ id: "zz_active_peer", projectKey: f.projectKey, workspaceRoot: binding.worktreeRoot!, state: "running" });
+  f.sessions.setFileIntents(f.session.id, [{ path: "same.txt", access: "write" }]);
+  f.sessions.setFileIntents(peer.id, [{ path: "same.txt", access: "write" }]);
+  const record = f.v2.integrations.create(f.projectKey, f.task.id, f.session.id);
+  const result = await f.v2.integrations.gate(f.projectKey, record.id, record.revision);
+  assert.equal(result.gates.noHighSeverityOverlap, false);
+  assert.equal(result.mergeReady, false);
 });
