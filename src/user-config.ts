@@ -119,6 +119,14 @@ export function setDevspaceConfigValue(
   return setDevspaceConfigValues([{ path, value }], env);
 }
 
+/** Read only the configuration file; do not load auth.json for root reconciliation. */
+export function readDevspaceAllowedRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const path = devspaceConfigPath(env);
+  const config = existsSync(path) ? readJsoncConfig(path) : defaultDevspaceConfig();
+  const roots = config.workspaces.allowedRoots;
+  return (roots.length ? roots : [process.cwd()]).map(root => resolve(expandHomePath(root)));
+}
+
 export function setDevspaceConfigValues(
   edits: DevspaceConfigEdit[],
   env: NodeJS.ProcessEnv = process.env,

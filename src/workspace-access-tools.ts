@@ -257,6 +257,8 @@ function registerRevokeTool(server: McpServer, accessManager: WorkspaceAccessMan
         revokedGrantCount: z.number().int().nonnegative(),
         removedFromConfig: z.boolean(),
         inheritedAccess: accessModeSchema.optional(),
+        configurationPending: z.boolean().optional(),
+        operationId: z.string().optional(),
       }),
       annotations: {
         readOnlyHint: false,
@@ -270,7 +272,10 @@ function registerRevokeTool(server: McpServer, accessManager: WorkspaceAccessMan
       const inherited = revoked.inheritedAccess
         ? ` The folder remains covered by a broader ${revoked.inheritedAccess} root.`
         : "";
-      const result = `Revoked DevSpace access entries for ${revoked.path}.${inherited}`;
+      const pending = revoked.configurationPending
+        ? " Authorization is revoked, but configuration cleanup is pending in the recovery journal; do not treat the stale configuration entry as a grant."
+        : "";
+      const result = `Revoked DevSpace access entries for ${revoked.path}.${inherited}${pending}`;
       return {
         content: [textBlock(result)],
         structuredContent: { result, ...revoked },

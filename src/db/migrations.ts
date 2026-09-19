@@ -255,6 +255,45 @@ const migrations: Migration[] = [
       create index orchestration_events_kind_idx on orchestration_events(session_id, kind, id desc);
     `),
   },
+  {
+    version: 20, name: "workspace-approval-reservations-and-config-journal",
+    up: sqlite => sqlite.exec(`
+      alter table workspace_access_requests add column revision integer not null default 1;
+      alter table workspace_access_requests add column decision_operation_id text;
+      alter table workspace_access_grants add column activation_state text not null default 'active';
+      alter table workspace_access_grants add column operation_id text;
+      alter table workspace_access_grants add column use_generation integer not null default 0;
+      create unique index workspace_access_grant_operation on workspace_access_grants(operation_id)
+        where operation_id is not null;
+      create table workspace_access_operations (
+        id text primary key,
+        kind text not null check(kind in ('approval', 'revocation')),
+        request_id text,
+        path text not null,
+        decision text not null,
+        grant_id text,
+        request_revision integer,
+        phase text not null,
+        revision integer not null default 1,
+        created_at text not null,
+        updated_at text not null,
+        detail_code text
+      );
+      create index workspace_access_operations_request on workspace_access_operations(request_id);
+      create table workspace_access_managed_roots (
+        path_key text primary key,
+        path text not null,
+        active_grant_id text,
+        operation_id text,
+        generation integer not null default 1
+      );
+      create table workspace_access_config_serialization (
+        singleton integer primary key check(singleton = 1),
+        operation_id text
+      );
+      insert into workspace_access_config_serialization(singleton, operation_id) values (1, null);
+    `),
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {

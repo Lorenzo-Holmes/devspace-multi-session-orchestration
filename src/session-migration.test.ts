@@ -15,12 +15,21 @@ test("version 18 session DB upgrades atomically, survives an injected migration 
   first.close();
   // Reconstruct the exact pre-19 session columns in an isolated fixture DB.
   const legacy = new Database(databasePath(dir));
-  legacy.exec(`drop index orchestration_events_kind_idx;
+  legacy.exec(`drop table workspace_access_config_serialization;
+    drop table workspace_access_managed_roots;
+    drop table workspace_access_operations;
+    drop index workspace_access_grant_operation;
+    alter table workspace_access_grants drop column activation_state;
+    alter table workspace_access_grants drop column operation_id;
+    alter table workspace_access_grants drop column use_generation;
+    alter table workspace_access_requests drop column revision;
+    alter table workspace_access_requests drop column decision_operation_id;
+    drop index orchestration_events_kind_idx;
     alter table orchestration_sessions drop column revision;
     alter table orchestration_sessions drop column incarnation;
     alter table orchestration_sessions drop column binding_generation;
     alter table orchestration_sessions drop column file_generation;
-    delete from devspace_schema_migrations where version = 19;
+    delete from devspace_schema_migrations where version >= 19;
     create trigger injected_migration_crash before insert on devspace_schema_migrations
       when new.version = 19 begin select raise(abort, 'injected migration crash'); end;`);
   legacy.close();
@@ -36,5 +45,6 @@ test("version 18 session DB upgrades atomically, survives an injected migration 
   upgraded.close();
   const restarted = openDatabase(dir);
   assert.equal((restarted.sqlite.prepare("select count(*) as n from devspace_schema_migrations where version = 19").get() as { n: number }).n, 1);
+  assert.equal((restarted.sqlite.prepare("select count(*) as n from devspace_schema_migrations where version = 20").get() as { n: number }).n, 1);
   restarted.close();
 });

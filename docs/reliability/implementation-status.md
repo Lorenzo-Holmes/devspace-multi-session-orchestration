@@ -13,6 +13,7 @@ its two commits above main changed CI only. Main was
 
 | Requirement | Implementation | Verification and limits |
 | --- | --- | --- |
+| A3 approval atomicity | Request revision/reservation precedes async verification. Temporary activation and approval/audit are atomic. Permanent prepared grants, managed-root authority and a durable configuration journal prevent a late file write from granting access. Revocation removes authority before cleanup; once-use restorations are generation-fenced. | Barrier concurrency, expiry, supersession, injected persistence/audit failure, independent SQLite managers and real JSONC reopen. Conservative administrative recovery is implemented; automatic runtime recovery and real process-kill acceptance are not certified. See `workspace-approval-recovery.md`. |
 | A4 scheduler starvation | SQL eligibility and dependency predicates precede ordering; history remains bounded. Claim, completion and release predicates reject stale/expired leases and wrong-project owners. | Actual SQLite fixtures with 500, 1,000 and 5,000 historical completed tasks. Priority ordering is deterministic, not a proof of starvation freedom under an infinite arrival of higher-priority work. |
 | A5 internal reconciliation | Complete project-scoped session/task/V2 reads; complete watchdog and automation reconciliation; independent source/output completeness; Supervisor counts use complete inputs. Latest test observations use a kind-filtered SQL query. | 501/1,001/5,000 historical alerts all reconcile despite a 200-row display limit. Integration gate's separate snapshot/evidence design is still outstanding. Complete reads are memory-resident: dense-conflict/resource-budget stress is not certified. |
 | A6 episode semantics | Task revisions, alert episodes and source generations drive new delivery/episode identifiers. Old revision acknowledgements cannot consume a new episode. | Ready/claimed/ready and blocked/running/blocked cycles entirely between polls/scans. No claim of cross-conversation takeover fencing. |
@@ -29,7 +30,8 @@ its two commits above main changed CI only. Main was
   proposed file exists. Unconnected validation tables/health changes were withdrawn.
   Existing command-keyword telemetry, running-process false-pass risk and caller-
   supplied integration evidence remain known issues; tests below do not certify them.
-- A3: approval reservation, cross-config durable recovery and approval/revocation races.
+- A3 follow-up: wire conservative journal recovery to the canonical runtime lifecycle;
+  retain `recovery_uncertain` when an external writer's final state cannot be established.
 - A7/A8: generation-fenced integration evaluation and actual candidate/target merge simulation.
 - A10/A11/A13: full project/logical-session/worker/attempt identities, worktree operation
   recovery and authoritative attempt-level fencing.
@@ -51,11 +53,11 @@ for Node ABI **137**. The isolated checkout is on exFAT.
 | `pnpm install --frozen-lockfile` with the default symlink layout | BLOCKED: exFAT cannot create the required links |
 | `pnpm install --frozen-lockfile --config.node-linker=hoisted` | PASS |
 | `pnpm --config.node-linker=hoisted rebuild better-sqlite3` plus a real in-memory query | PASS |
-| Focused command below | PASS: 29 tests, 0 failed, 0 skipped |
+| Focused command below, expanded with workspace approval and OAuth regression files | PASS: 51 tests, 0 failed, 0 skipped |
 | `pnpm --config.node-linker=hoisted typecheck` | PASS |
 | `git diff --check` | PASS |
-| Full repository test suite | NOT RUN at this checkpoint |
-| Full build | NOT RUN at this checkpoint |
+| Full repository test suite at `33fb2b4188da8cd99f1962c881f3254b037c1205` | FAIL: 324 total, 310 passed, 1 failed, 13 skipped. The failure was the OAuth store test's obsolete exact migration list (18 entries); the assertion now includes migrations 19 and 20 and its focused rerun passes. Full rerun of this newer checkpoint is pending. |
+| Full build at `33fb2b4188da8cd99f1962c881f3254b037c1205` | PASS; Vite reported large-chunk warnings. Newer checkpoint build is pending. |
 | Real Browser/ChatGPT rollover | NOT RUN; prerequisite blocked |
 
 Set `npm_config_node_linker=hoisted` for subsequent pnpm commands on exFAT so its
@@ -74,10 +76,20 @@ pnpm --config.node-linker=hoisted exec tsx --test --test-concurrency=1
   src/orchestration-automation.test.ts
   src/orchestration-watchdog.test.ts
   src/orchestration-supervisor.test.ts
+  src/workspace-approval-reliability.test.ts
+  src/workspace-access.test.ts
+  src/oauth-store.test.ts
 ```
 
 Earlier attempts are not counted as passes: an implicit pnpm reinstall failed on
 exFAT; a subsequent run failed all 15 setup operations due to a cached Node-22
 native SQLite binary; one later test failed during Windows cleanup because a
 fixture connection was still open. The native module and test cleanup were
-corrected, then the complete 29-test command above passed with zero skips.
+corrected, then the initial 29-test command passed with zero skips. After the
+approval implementation, an intermediate 21-test command also passed. A later
+combined command lost its process receipt when the external DevSpace service
+restarted (reported start changed to `2026-09-19T14:55:58.618Z`); that attempt is
+**UNKNOWN**, not PASS. The complete current 51-test command was then rerun and
+passed with zero skips, typecheck exit 0 and diff-check exit 0. Test output and
+exit receipts for that rerun were retained in the isolated checkout's Git
+metadata directory, not in user application data.
