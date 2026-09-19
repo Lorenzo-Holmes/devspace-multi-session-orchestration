@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - pro/v2.1-reliability-hardening
   pull_request:
 
 permissions:
