@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "status": "PARTIAL_NOT_RELEASE_READY",
+  "scope": "recorded evidence, not a new CI run or production acceptance",
+  "local": {
+    "node": "v22.16.0",
+    "platform": "linux",
+    "arch": "x64",
+    "pnpmAvailable": false,
+    "standaloneContracts": {
+      "tests": 91,
+      "pass": 89,
+      "fail": 0,
+      "platformSkip": 2
+    },
+    "wrapper": {
+      "tests": 1,
+      "pass": 1,
+      "duplicatesChildSuite": true
+    },
+    "applicationBuild": "ENVIRONMENT_SKIP",
+    "coordinatorBenchmark": "ENVIRONMENT_SKIP"
+  },
+  "remoteObserved": {
+    "runId": 35444001138,
+    "headSha": "ca9e415349c33dcf39c8f0c083128c3489938061",
+    "ubuntuJobId": 105899694349,
+    "node": "22.23.2",
+    "pnpm": "11.25.0",
+    "allThreePlatformInstall": "PASS",
+    "allThreePlatformTypecheck": "PASS",
+    "ubuntuFullSourceTests": {
+      "tests": 307,
+      "pass": 294,
+      "fail": 2,
+      "skipped": 11
+    },
+    "ubuntuBuild": "SKIPPED_AFTER_FAILURE",
+    "windowsTestAtSnapshot": "CANCELLED",
+    "macosTestAtSnapshot": "IN_PROGRESS"
+  },
+  "workflowUpdate": "BLOCKED_BY_TOOL_SAFETY_CHECK_UNCHANGED",
+  "productionActionsPerformed": false,
+  "notEstablished": [
+    "all-green final commit",
+    "real Node 24 native execution",
+    "actual Windows release acceptance",
+    "full subsystem performance baseline",
+    "packaged V2 execution",
+    "production artifact verification",
+    "real rollback"
+  ]
+}

@@ -5,6 +5,7 @@ import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import {toolCatalogFingerprints} from './release-contract.mjs';
 
 const service='D:/DevSpace/devspace';
 const parseJson=bytes=>JSON.parse(bytes.toString().replace(/^\uFEFF/,''));
@@ -30,13 +31,19 @@ try{
   await client.connect(new StreamableHTTPClientTransport(transportUrl,{requestInit:{headers:{Authorization:`Bearer ${tokens.access_token}`}}}));
   const tools=(await client.listTools()).tools;
   const names=tools.map(t=>t.name).sort();
+  const catalogFingerprints=toolCatalogFingerprints(tools);
+  if(process.argv[4]){
+    assert.match(process.argv[4],/^[a-f0-9]{64}$/,'Trusted definition fingerprint must be SHA-256');
+    assert.equal(catalogFingerprints.toolCatalogDefinitionFingerprint,process.argv[4],'Observed tool definitions changed');
+  }
   const modelNames=tools.filter(t=>!Array.isArray(t._meta?.ui?.visibility)||t._meta.ui.visibility.includes('model')).map(t=>t.name).sort();
   const runtime=(await client.callTool({name:'devspace_runtime_info',arguments:{}})).structuredContent;
   assert.equal(runtime.buildId,pointer.buildId);
   assert.equal(runtime.toolCatalogCount,names.length);
   assert.equal(runtime.toolCatalogFingerprint,createHash('sha256').update(names.join('\n')).digest('hex'));
+  assert.equal(runtime.toolCatalogFingerprint,catalogFingerprints.toolCatalogNameFingerprint);
   const processInfo=parseJson(await readFile(join(service,'.devspace-process.json'),'utf8'));
-  const result={result:'PASS',observedAt:new Date().toISOString(),origin,consumer:'Official MCP SDK, not a ChatGPT conversation',runtime,pid:processInfo.pid,serverToolCount:names.length,modelVisibleToolCount:modelNames.length,tools:names};
+  const result={result:'PASS',observedAt:new Date().toISOString(),origin,consumer:'Official MCP SDK, not a ChatGPT conversation',runtime,pid:processInfo.pid,serverToolCount:names.length,modelVisibleToolCount:modelNames.length,tools:names,...catalogFingerprints};
   if(process.argv[3])await writeFile(process.argv[3],JSON.stringify(result,null,2),{flag:'wx'});
   console.log(JSON.stringify(result));
 }finally{

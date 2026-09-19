@@ -3,6 +3,8 @@ param(
   [Parameter(Mandatory = $true)][string]$ReleasePath
 )
 $ErrorActionPreference = 'Stop'
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+Get-Command Get-FileHash -ErrorAction Stop | Out-Null
 $cardRepo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 if ($cardRepo -ne 'D:\DevSpace-Goal-PoC\.poc\replan-v1\devspace') { throw 'Isolated repository required.' }
 $cardRelease = (Resolve-Path -LiteralPath $ReleasePath).Path
