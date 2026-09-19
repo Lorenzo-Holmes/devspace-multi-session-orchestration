@@ -44,3 +44,18 @@ for (const shell of ['powershell.exe', 'pwsh.exe']) test('no-profile Windows par
   assert.ifError(result.error); assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(JSON.parse(result.stdout.trim()).status, 'PASS');
 });
+
+test('live runtime probe computes definition identity without replacing the name hash', async () => {
+  const script = await source('orchestration-v2-runtime-probe.mjs');
+  assert.match(script, /catalogFingerprints=toolCatalogFingerprints\(tools\)/);
+  assert.match(script, /runtime\.toolCatalogFingerprint,catalogFingerprints\.toolCatalogNameFingerprint/);
+  assert.match(script, /catalogFingerprints\.toolCatalogDefinitionFingerprint,process\.argv\[4\]/);
+});
+
+test('release assembly copies and hashes both dependency inputs and checks Node 24', async () => {
+  const script = await source('prepare-chat-card-release.mjs');
+  assert.match(script, /dependencyInputs=\['package\.json','pnpm-lock\.yaml'\]/);
+  assert.match(script, /files\.push\(\.\.\.dependencyInputs\)/);
+  assert.match(script, /for\(const path of dependencyInputs\)await cp/);
+  assert.match(script, /Release preparation requires Node 24/);
+});

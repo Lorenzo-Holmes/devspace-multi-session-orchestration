@@ -5,6 +5,7 @@ import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root=fileURLToPath(new URL('../',import.meta.url));
+assert.equal(Number(process.versions.node.split('.')[0]),24,'Release preparation requires Node 24; do not rebuild shared native dependencies');
 assert.equal(resolve(root).toLowerCase(),resolve('D:/DevSpace-Goal-PoC/.poc/replan-v1/devspace').toLowerCase());
 const buildId=process.argv[2];
 assert.match(buildId ?? '',/^chat-goal-card-preview-\d{8}-\d{2}$/);
@@ -25,11 +26,16 @@ async function enumerate(base,dir='') {
   }
 }
 for(const dir of ['dist','bin','schema','skills']) await enumerate(root,dir);
-files.push('package.json');
+const dependencyInputs=['package.json','pnpm-lock.yaml'];
+for(const path of dependencyInputs){
+  const info=await lstat(join(root,path));
+  assert.ok(info.isFile()&&!info.isSymbolicLink(),'Dependency input must be a regular file');
+}
+files.push(...dependencyInputs);
 // Exclusive new directory only. Never overwrite another candidate or current release.
 await mkdir(destination);
 for(const dir of ['dist','bin','schema','skills']) await cp(join(root,dir),join(destination,dir),{recursive:true,force:false,errorOnExist:true});
-await cp(join(root,'package.json'),join(destination,'package.json'),{force:false,errorOnExist:true});
+for(const path of dependencyInputs)await cp(join(root,path),join(destination,path),{force:false,errorOnExist:true});
 await symlink(dependencies,join(destination,'node_modules'),'junction');
 const hashes={};
 for(const path of files.sort()) {

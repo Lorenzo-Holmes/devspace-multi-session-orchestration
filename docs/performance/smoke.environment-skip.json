@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "status": "ENVIRONMENT_SKIP",
+  "scope": "actual CoordinatorStore API; other subsystem adapters are not implemented",
+  "environment": {
+    "node": "v22.16.0",
+    "platform": "linux",
+    "arch": "x64",
+    "nativeABI": "127",
+    "cpuModel": "AMD EPYC 9V74 80-Core Processor",
+    "logicalCpus": 5
+  },
+  "requestedDatasetSizes": {
+    "sessions": [
+      100,
+      1000,
+      10000
+    ],
+    "tasks": [
+      100,
+      1000,
+      10000
+    ],
+    "fileIntents": [
+      1000,
+      10000,
+      100000
+    ],
+    "alerts": [
+      1000,
+      10000
+    ],
+    "dueWork": [
+      1000,
+      10000
+    ],
+    "integrations": [
+      100,
+      1000,
+      10000
+    ],
+    "handoffs": [
+      100,
+      1000,
+      10000
+    ]
+  },
+  "cases": [],
+  "notCovered": [
+    "session lookup/list/events/health",
+    "coordinator manager ready discovery",
+    "file-intent conflict scans",
+    "watchdog scan/reconciliation/list",
+    "automation poll/list/ack",
+    "integration list/status/evidence",
+    "handoff reads",
+    "supervisor summary/timeline/output bounds",
+    "workspace registry"
+  ],
+  "instrumentation": {
+    "rowsScanned": "unavailable",
+    "sqliteQueryCount": "unavailable",
+    "latencyUnit": "milliseconds",
+    "memory": "sampled process RSS/heap, not native peak",
+    "timing": "API latency excludes serialization; serialization measured separately"
+  },
+  "reason": "Built dist/coordinator-store.js is absent; run the canonical build first"
+}

@@ -1,73 +1,84 @@
-# CI verification coverage
+# CI coverage and recorded verification
 
-## Audited source
+Status: partial implementation; not release-ready. This document separates
+workflow configuration, local standalone contracts and actual remote results.
+Historical numbers in REVIEW_BRIEF.md belong to another source workspace and
+are not substituted for this branch's results.
 
-This inventory describes `.github/workflows/ci.yml` and `package.json` at
-`5b0fefa68e0de0f544f7dd30e4d63f4f9247ed80`. It is a configuration audit, not
-evidence that any job or test passed. The verification numbers in
-`REVIEW_BRIEF.md` describe a separate source workspace and must not be treated
-as results for this branch.
+## Unchanged workflow and added test discovery
 
-## Existing workflow
+`.github/workflows/ci.yml` at base
+`5b0fefa68e0de0f544f7dd30e4d63f4f9247ed80` runs on main pushes and pull
+requests. It has Ubuntu/macOS/Windows jobs with Node 22 and a 15-minute timeout:
+checkout; pinned pnpm setup; frozen dependency install; Linux sandbox
+prerequisites; typecheck; all source tests; build; doctor. Later steps are
+skipped after a failure. No new workflow was written.
 
-The workflow runs on pushes to `main` and on pull requests. Its smoke matrix
-includes `ubuntu-latest`, `macos-latest`, and `windows-latest`, with Node 22
-selected by the pinned pnpm setup action. Each job has a 15-minute timeout.
+An attempted workflow update was blocked by the tool safety check, not by a
+reported GitHub HTTP permission error. Ordinary source/script/document writes
+succeeded. No alternate write route was used for the blocked workflow.
 
-The configured sequence is:
+`src/release-engineering.test.ts` makes the new engineering contract suites
+discoverable by the existing source-test command. It removes inherited
+NODE_TEST_CONTEXT from the child, requests TAP, verifies that child tests
+actually ran, and emits their totals and skip reasons. Benchmarks are not
+silently run inside unit tests. Test files remain excluded from production
+TypeScript output by the existing tsconfig.build.json.
 
-1. Checkout and set up pnpm/Node.
-2. `pnpm install --frozen-lockfile`.
-3. On Linux, install the sandbox prerequisites.
-4. `pnpm typecheck`.
-5. `pnpm test` with the Linux sandbox requirement enabled on Linux only.
-6. `pnpm build`.
-7. `node dist/cli.js doctor`.
+## Local final standalone contracts
 
-`pnpm test` invokes `tsx --test --test-concurrency=1 "src/**/*.test.ts"`.
-`pnpm build` invokes clean, the Vite app build, the chat-card build, and the
-TypeScript build in that order. The configured suite is broader than a
-single smoke test, but test-level platform coverage needs actual runner
-results; matrix membership alone does not prove Windows-specific behavior.
+```text
+node --test scripts/release-contract.test.mjs scripts/release-pipeline.test.mjs benchmarks/orchestration/fixtures.test.mjs
+```
 
-## Coverage gaps in the audited workflow
+Recorded on Linux x64 with Node v22.16.0: **91 total / 89 pass / 0 fail /
+2 PLATFORM_SKIP**. These are 74 integrity/rollback/fingerprint cases, eight
+generator cases and nine pipeline cases. The two skips require real Windows
+PowerShell 5.1 and PowerShell 7. No Windows execution is inferred from static
+source checks. The source wrapper was separately run with Node's experimental
+TypeScript stripping and passed; it contains the same child suite, not 91
+additional application tests. This is not the repository-wide pnpm suite.
 
-| Area | Configured coverage | Evidence still needed |
+The local runtime is below the package minimum >=22.19, pnpm is absent and a
+clone attempt failed DNS resolution for github.com. Local application install,
+full-source tests, TypeScript checking and canonical build were unavailable.
+The build wrapper returned ENVIRONMENT_SKIP; the real CoordinatorStore smoke
+also returned ENVIRONMENT_SKIP because dist was absent. These are not passes.
+
+## Actual remote run, pinned to the tested revision
+
+Run: https://github.com/Lorenzo-Holmes/devspace-multi-session-orchestration/actions/runs/35444001138
+Head: `ca9e415349c33dcf39c8f0c083128c3489938061` (earlier than this document).
+Observed September 19, 2026; this is not a claim about a later head.
+
+Dependency installation and typecheck succeeded in all three matrix jobs.
+Ubuntu job 105899694349 used Node 22.23.2 and pnpm 11.25.0 and completed the
+source suite with **307 total / 294 pass / 2 fail / 11 skip**. The new engineering
+wrapper passed. Failures were the unchanged server.test.ts CUA tool exposure
+and browser_state scope assertions; see [follow-ups](../scale-release-followups.md).
+Ubuntu build and doctor were skipped. Windows testing was cancelled and
+macOS testing was still in progress at the recorded job snapshot. Do not
+interpret those snapshots as successful completed platform runs.
+
+The hosted runner's action bootstrap runtime is distinct from pnpm's selected
+application runtime; the observed application was Node 22.23.2, not Node 24.
+
+## Coverage still requiring execution or integration
+
+| Area | Current evidence | Missing evidence |
 | --- | --- | --- |
-| Dependency installation | Frozen lockfile on all three platforms | Per-run installation outcome and runtime identity |
-| TypeScript | Repository typecheck command | Exit status for the tested commit |
-| Unit/integration tests | Complete existing source test command | Totals and explicit skip classification |
-| Production build | Existing package build command | Exit status and artifact validation |
-| Whitespace | No explicit check | `git diff --check` for the proposed changes |
-| Release-script static checks | Not separately configured | JavaScript syntax and PowerShell parser checks |
-| Packaged acceptance | Not separately configured | Tests against assembled dist and isolated state |
-| Release/rollback integrity | Not separately configured | Positive and fault-injection fixture results |
-| Scalability benchmarks | Not configured | Smoke metrics plus a separate full-scale run |
-| Windows PowerShell | No explicit acceptance step | Windows PowerShell 5.1 and PowerShell 7 without profiles |
-| Evidence artifacts | No upload step | Sanitized summaries, not production state or secrets |
+| Release integrity / offline rollback | Real temporary-file fault tests | Actual candidate/rollback artifact verification |
+| Canonical build / stale output | Wrapper and static delegation contracts | Completed application build and native runtime |
+| PowerShell | Explicit Utility import; parser/hash harness | Real no-profile 5.1/7 release acceptance |
+| Definition fingerprint | Same-name schema/annotation/visibility regressions; probe wiring | Trusted complete catalog capture from exact candidate |
+| Packaged V2 HTTP acceptance | Existing authenticated test located; observed CI skip | Isolated portable fixture and successful packaged run |
+| Scalability | Deterministic generators; real store adapter | Executed smoke/full measurements and remaining subsystem adapters |
+| Whitespace and script syntax | Local changed-file checks only | Workflow-level checks against complete checkout |
+| Evidence | Sanitized repository JSON and documentation | Always-upload CI artifacts tied to final commit |
 
-## Result vocabulary
-
-Use `PASS` only for an executed check whose assertions passed. Use `FAIL` for
-an executed check that failed. Use `PLATFORM_SKIP` when a test is deliberately
-inapplicable to the current platform, and include its reason. Use
-`ENVIRONMENT_SKIP` when a required runtime, dependency, permission, or runner
-is unavailable. A skip is not a pass. Do not infer test counts from historical
-release notes or from the workflow definition.
-
-## Current execution limitation
-
-The engineering environment inspected for this change has Node 22.16.0 and no
-`pnpm` executable. Node 22.16.0 is below the package's declared minimum of
-22.19. A local clone attempt failed because `github.com` could not be resolved.
-Consequently installation, the existing test suite, typecheck, and production
-build have not run in this environment.
-
-An attempted update to `.github/workflows/ci.yml` was blocked by the tool
-safety check. No GitHub HTTP permission error was returned, so this does not
-establish that the repository itself denied workflow permissions. Remote
-comparison immediately afterward confirmed this branch still matched the
-base commit. No alternate write route was used for the blocked workflow.
-
-This document does not change CI behavior, claim new platform coverage, or
-establish release readiness.
+Use PASS only for executed successful assertions, FAIL for executed failures,
+PLATFORM_SKIP for inapplicable platforms, and ENVIRONMENT_SKIP for missing
+required execution conditions. Cancellation, pending results and unimplemented
+coverage are separate states. No skip or descriptor generation is a release
+acceptance pass. Raw tokens, configurations, production databases and fixture
+state must never be uploaded as public evidence.

@@ -5,6 +5,7 @@ import { lstat, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path';
 
 export const INTEGRITY_FILE = 'release-integrity.json';
+export const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 export const REQUIRED_RUNTIME = Object.freeze([
   'package.json', 'pnpm-lock.yaml', 'dist/cli.js', 'dist/server.js',
   'dist/orchestration-v2-tools.js', 'dist/supervisor.html',
@@ -172,6 +173,7 @@ export async function sealRelease(root, metadata, tools) {
   assert.equal(manifest.runtime.nodeMajor, metadata.requiredNodeMajor, 'Build Node major mismatch');
   validateMetadata(manifest, files); await validateServerIdentity(root, manifest);
   const bytes = JSON.stringify(manifest, null, 2) + '\n';
+  assert.ok(Buffer.byteLength(bytes) <= MAX_MANIFEST_BYTES, 'Integrity manifest size limit exceeded');
   await writeFile(join(root, INTEGRITY_FILE), bytes, { flag: 'wx' });
   return { manifest, manifestSha256: digest(bytes) };
 }
@@ -183,7 +185,9 @@ export async function verifyRelease(root, expectedSha256) {
   root = await realpath(root);
   const manifestPath = join(root, INTEGRITY_FILE);
   assert.ok((await lstat(manifestPath)).isFile() && !(await lstat(manifestPath)).isSymbolicLink(), 'Manifest must be a regular file');
+  assert.ok((await lstat(manifestPath)).size <= MAX_MANIFEST_BYTES, 'Integrity manifest size limit exceeded');
   const bytes = await readFile(manifestPath);
+  assert.ok(bytes.length <= MAX_MANIFEST_BYTES, 'Integrity manifest size limit exceeded');
   assert.equal(digest(bytes), expectedSha256, 'Integrity manifest changed');
   const manifest = JSON.parse(bytes.toString('utf8'));
   validateMetadata(manifest, manifest.files);

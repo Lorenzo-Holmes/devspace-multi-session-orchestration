@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { canonicalJson, toolCatalogFingerprints, portablePath, inventory, sealRelease,
-  verifyRelease, snapshotRollback, verifyRollback, REQUIRED_RUNTIME, INTEGRITY_FILE } from './release-contract.mjs';
+  verifyRelease, snapshotRollback, verifyRollback, REQUIRED_RUNTIME, INTEGRITY_FILE, MAX_MANIFEST_BYTES } from './release-contract.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const tools = [
@@ -187,4 +187,10 @@ for (const [label, mutate] of [
 test('rollback preflight rejects unknown cross-migration compatibility', async t => {
   const p = await pair(t); p.context.databaseMigrationVersion += 1;
   await assert.rejects(snapshotRollback(p.snapshot.candidateSpec, p.snapshot.rollbackSpec, p.context));
+});
+
+test('oversized manifest is rejected before JSON parsing', async t => {
+  const f = await fixture(t);
+  await truncate(join(f.release, INTEGRITY_FILE), MAX_MANIFEST_BYTES + 1);
+  await assert.rejects(verifyRelease(f.release, f.manifestSha256), /size limit/);
 });
