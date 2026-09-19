@@ -14,6 +14,7 @@ export interface RecommendationContext {
   targetFresh?: boolean;
   realHumanChannel?: boolean;
   durableGrant?: boolean;
+  freshProject?: boolean;
   explicitUserContinuation?: boolean;
   userRequestedAction?: boolean;
   humanGate?: "not-required" | "approved" | "pending" | "denied" | "unknown";
@@ -44,6 +45,7 @@ function missingContext(tool: ToolCapability, c: Readonly<RecommendationContext>
     ["requiresVerifiedOwnerOrClientRecordIdentity", c.ownerKnown, "owner-unknown"],
     ["requiresRealHostFormOrAcknowledgedCardChannel", c.realHumanChannel, "real-human-channel-unknown"],
     ["requiresDurableWorkspaceGrant", c.durableGrant, "durable-grant-unknown"],
+    ["requiresFreshProjectAndSeparateDataRoot", c.freshProject, "fresh-project-unknown"],
     ["requiresExplicitUserContinuationOrDiagnosticRequest", c.explicitUserContinuation, "explicit-continuation-absent"],
   ];
   for (const [condition, value, reason] of checks) if (p.conditions.includes(condition) && value !== true) reasons.push(reason);

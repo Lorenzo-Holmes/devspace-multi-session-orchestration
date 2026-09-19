@@ -42,18 +42,18 @@ export interface Presentation {
   sections: { key: SectionKey; title: string; total: number; received: number; rows: ObservationRow[] }[];
   timeline: TimelineRow[];
 }
-export const PRESENTATION_LIMITS = Object.freeze({ sections: 11, rowsPerSection: 8, eventsPerRow: 3, timeline: 40, text: 240, staleAfterMs: 300_000, htmlBytes: 131_072 });
+export const PRESENTATION_LIMITS = Object.freeze({ sections: 11, rowsPerSection: 8, eventsPerRow: 3, timeline: 40, text: 240, staleAfterMs: 300_000, htmlBytes: 131_072, jsonBytes: 262_144 });
 
 /** Bound before Unicode iteration; strip directional/control overrides, preserve natural RTL letters. */
 export function displayText(value: unknown, max: number = PRESENTATION_LIMITS.text): string {
   const text = typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "Unknown";
   const bound = Number.isFinite(max) ? Math.max(1, Math.min(1000, Math.trunc(max))) : PRESENTATION_LIMITS.text;
-  const clean = text.slice(0, bound * 2 + 2).replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ");
+  const clean = text.slice(0, bound * 2 + 2).replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ");
   const chars = Array.from(clean);
   return chars.length > bound || text.length > bound * 2 + 2 ? chars.slice(0, bound - 1).join("") + "\u2026" : clean;
 }
 export function snapshotFreshness(at: string | undefined, nowMs: number): { age: string; stale: boolean; unknown: boolean } {
-  const time = typeof at === "string" ? Date.parse(at) : NaN;
+  const time = typeof at === "string" && at.length <= 80 ? Date.parse(at) : NaN;
   const elapsed = nowMs - time;
   if (!Number.isFinite(time) || !Number.isFinite(nowMs) || elapsed < 0) return { age: "Unknown (missing timestamp or clock skew)", stale: false, unknown: true };
   return { age: elapsed < 60_000 ? `${Math.floor(elapsed / 1000)}s` : `${Math.floor(elapsed / 60_000)}m`, stale: elapsed > PRESENTATION_LIMITS.staleAfterMs, unknown: false };
@@ -66,26 +66,34 @@ function nextInspection(key: SectionKey, row: SnapshotItem): string {
   if (key === "handoffs") return "handoff_status: inspect checkpoint and receiver context";
   if (key === "conflicts") return "session_conflicts: inspect reported overlap; completeness may be unknown";
   if (key === "alerts") return "watchdog_alert_list: inspect persisted signal; no repair is performed";
-  if (/lease|task/i.test(row.title + " " + row.state) || /Tasks$/.test(key) || key === "tasks") return "coordinator_task_status: inspect task authority, revision and lease";
-  if (/unverified|test/i.test(row.title + " " + row.state)) return "session_events: inspect recorded test evidence; an event is not verified success";
+  const hint = displayText(row.title, 120) + " " + displayText(row.state, 100);
+  if (/lease|task/i.test(hint) || /Tasks$/.test(key) || key === "tasks") return "coordinator_task_status: inspect task authority, revision and lease";
+  if (/unverified|test/i.test(hint)) return "session_events: inspect recorded test evidence; an event is not verified success";
   return "session_status / session_events: inspect recorded state and last activity, not model liveness";
 }
+const completeness = (value: unknown): Completeness => value === "complete" || value === "incomplete" ? value : "unknown";
 const extensionKey = (key: SectionKey, id: string) => `${key}:${id}`;
 export function presentSupervisor(s: Snapshot, context: PresentationContext): Presentation {
   const fresh = snapshotFreshness(s.generatedAt, context.nowMs);
   const trust: TrustLevel = fresh.unknown ? "Unknown" : fresh.stale ? "Stale" : "Observed";
-  const dataComplete = context.completeness?.data ?? "unknown";
-  const inputComplete = context.completeness?.input ?? "unknown";
-  const sections = SECTION_ORDER.map(key => s.sections.slice(0, PRESENTATION_LIMITS.sections).find(section => section.key === key)).filter(section => section !== undefined).map(section => {
+  const supplied = s.sections.slice(0, PRESENTATION_LIMITS.sections);
+  const structurallyIncomplete = supplied.length !== SECTION_ORDER.length || new Set(supplied.map(x => x.key)).size !== SECTION_ORDER.length;
+  const dataComplete = structurallyIncomplete ? "incomplete" as const : completeness(context.completeness?.data);
+  const inputComplete = structurallyIncomplete ? "incomplete" as const : completeness(context.completeness?.input);
+  let displayLimited = s.sections.length > PRESENTATION_LIMITS.sections;
+  const sections = SECTION_ORDER.map(key => supplied.find(section => section.key === key)).filter(section => section !== undefined).map(section => {
     const rows = section.items.slice(0, PRESENTATION_LIMITS.rowsPerSection).map(row => {
+      if (row.timeline.length > PRESENTATION_LIMITS.eventsPerRow) displayLimited = true;
       const ext = context.extensions?.[extensionKey(section.key, row.id)];
       const rowTime = ext?.observedAt;
       const age = snapshotFreshness(rowTime, context.nowMs);
+      const evaluated = snapshotFreshness(ext?.checkedAt, context.nowMs);
       const base: TrustLevel = section.key === "integrations" ? "Unknown" : ["sessions", "needsAttention", "conflicts", "readyTasks", "blockedTasks"].includes(section.key) ? "Derived" : "Observed";
-      const rowTrust: TrustLevel = fresh.stale || age.stale ? "Stale" : fresh.unknown ? "Unknown" : base;
+      const invalidClock = fresh.unknown || (rowTime !== undefined && age.unknown) || (ext?.checkedAt !== undefined && evaluated.unknown);
+      const rowTrust: TrustLevel = invalidClock ? "Unknown" : fresh.stale || age.stale || (section.key === "integrations" && evaluated.stale) ? "Stale" : base;
       const facts = (["revision", "generation", "logicalSession", "incarnation", "attempt", "evidence", "deliveryEpisode", "workspace", "filesTouched"] as const)
-        .filter(name => ext?.[name] !== undefined).slice(0, 6).map(name => `${name} (reported): ${displayText(ext![name], 80)}`);
-      if (section.key === "integrations") facts.unshift(ext?.checkedAt ? `Last evaluated at ${displayText(ext.checkedAt, 80)}; freshness must be checked against current state` : "Last evaluated at: see source detail; structured freshness is Unknown");
+        .filter(name => ext?.[name] !== undefined).map(name => `${name} (reported): ${displayText(ext![name], 80)}`);
+      if (section.key === "integrations") facts.unshift(ext?.checkedAt ? `Last evaluated at ${displayText(ext.checkedAt, 80)}; evaluation age ${evaluated.age}; current authority must be rechecked` : "Last evaluated at: see source detail; structured freshness is Unknown");
       const source = displayText(ext?.source ?? `supervisor_summary/v1:${section.key}`, 100);
       return {
         id: displayText(row.id, 100), title: displayText(row.title, 120), state: labelState(row.state), detail: displayText(row.detail), source,
@@ -93,7 +101,7 @@ export function presentSupervisor(s: Snapshot, context: PresentationContext): Pr
         nextInspection: nextInspection(section.key, row), facts,
         timeline: row.timeline.slice(0, PRESENTATION_LIMITS.eventsPerRow).map(event => {
           const ef = snapshotFreshness(event.at, context.nowMs);
-          return { at: displayText(event.at, 80), source, subject: displayText(row.title, 80), kind: displayText(event.kind, 60), summary: displayText(event.detail, 160), trust: ef.unknown ? "Unknown" as const : ef.stale ? "Stale" as const : section.key === "tasks" ? "Derived" as const : "Observed" as const };
+          return { at: displayText(event.at, 80), source, subject: displayText(row.title, 80), kind: displayText(event.kind, 60), summary: displayText(event.detail, 160), trust: ef.unknown || fresh.unknown ? "Unknown" as const : ef.stale || fresh.stale ? "Stale" as const : section.key === "tasks" ? "Derived" as const : "Observed" as const };
         }),
       };
     });
@@ -109,7 +117,18 @@ export function presentSupervisor(s: Snapshot, context: PresentationContext): Pr
   });
   const countKeys = ["active", "idle", "stalled", "blocked", "readyReview", "conflicts", "alerts", "completed"] as const;
   const counts = Object.fromEntries(countKeys.map(key => [key, finiteCount(s.counts[key])])) as Snapshot["counts"];
-  return { project: displayText(s.project), snapshotAt: displayText(s.generatedAt, 80), snapshotAge: fresh.age, stale: fresh.stale, clockUnknown: fresh.unknown,
-    dataComplete, inputComplete, truncated: s.truncated || sections.some(x => x.total > x.rows.length || x.received > x.rows.length) || timeline.length > PRESENTATION_LIMITS.timeline,
+  const result: Presentation = { project: displayText(s.project), snapshotAt: displayText(s.generatedAt, 80), snapshotAge: fresh.age, stale: fresh.stale, clockUnknown: fresh.unknown,
+    dataComplete, inputComplete, truncated: s.truncated || displayLimited || sections.some(x => x.total > x.rows.length || x.received > x.rows.length) || timeline.length > PRESENTATION_LIMITS.timeline,
     trust, source: "supervisor_summary/v1 (bounded observation)", counts, sections, timeline: timeline.slice(0, PRESENTATION_LIMITS.timeline) };
+  const encoder = new TextEncoder();
+  while (encoder.encode(JSON.stringify(result)).byteLength > PRESENTATION_LIMITS.jsonBytes) {
+    result.truncated = true;
+    if (result.timeline.length) result.timeline.pop();
+    else {
+      const largest = [...result.sections].sort((a, b) => b.rows.length - a.rows.length)[0];
+      if (!largest?.rows.length) throw new Error("Fixed supervisor model exceeds JSON budget");
+      largest.rows.pop();
+    }
+  }
+  return result;
 }

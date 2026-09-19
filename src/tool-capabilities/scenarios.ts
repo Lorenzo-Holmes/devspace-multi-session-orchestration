@@ -6,7 +6,7 @@ export interface SelectionScenario { id: string; request: string; context: Recom
 const READY: RecommendationContext = {
   role: "Worker", workspace: "modify", sessionKnown: true, taskKnown: true, revisionKnown: true,
   currentTaskAuthority: true, existingRecord: true, ownerKnown: true, targetFresh: true,
-  realHumanChannel: true, durableGrant: true, explicitUserContinuation: true,
+  realHumanChannel: true, durableGrant: true, freshProject: true, explicitUserContinuation: true,
   userRequestedAction: true, humanGate: "not-required",
 };
 /** Independent, hand-reviewed oracles; no expected name is derived from the manifest. */
@@ -119,6 +119,7 @@ const negatives: readonly [string, string, string, Partial<RecommendationContext
   ["browser-unknown-gate", "browser.act", "Unknown approval does not mean permission.", { humanGate: "unknown" }],
   ["process-no-record", "process.interact", "Do not invent a numeric process handle.", { existingRecord: false }],
   ["chat-no-owner", "chat-goal.create", "Caller text cannot substitute for authenticated ownership.", { ownerKnown: false }],
+  ["chat-not-fresh", "chat-goal.create", "Existing project contents must not be enrolled as a fresh Chat Goal.", { freshProject: false }],
   ["chat-no-channel", "chat-goal.claim", "A tool being listed is not a successful channel preflight.", { realHumanChannel: false }],
   ["chat-no-continuation", "chat-goal.resume", "An ended turn cannot resume itself.", { explicitUserContinuation: false }],
   ["card-no-continuation", "card.represent", "Do not automatically re-present timed-out decisions.", { explicitUserContinuation: false }],

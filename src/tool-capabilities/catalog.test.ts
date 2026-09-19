@@ -39,6 +39,8 @@ test("risk, side effect and abstract precondition boundaries are explicit", () =
   assert.equal(get("integration_status").mutability, "read"); assert.equal(get("integration_gate").mutability, "mutate");
   assert.equal(get("show_changes").localStateMutation, "incidental");
   assert.equal(get("chat_card_probe_status").localStateMutation, "yes");
+  assert.equal(get("chat_goal_create").projectMutation, "possible");
+  assert.ok(!get("chat_goal_create").constraints.includes("metadataOnly"));
   assert.ok(!get("goal_start").constraints.includes("doesNotSpawnModel"));
   for (const n of ["coordinator_release", "coordinator_complete", "worktree_provision", "chat_goal_complete"]) assert.ok(get(n).prerequisites.requiresCurrentTaskAuthority);
   assert.ok(get("worktree_cleanup_status").constraints.includes("doesNotDeleteWorktree"));
