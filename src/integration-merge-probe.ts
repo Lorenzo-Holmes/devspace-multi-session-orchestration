@@ -54,6 +54,26 @@ async function git(cwd: string, args: string[], env = environment()): Promise<st
   return (await exec("git", ["-c", "core.fsmonitor=false", ...args], { cwd, env, timeout: 15_000, maxBuffer: 2 * 1024 * 1024 })).stdout.trim();
 }
 
+async function usesSourceFilter(root: string): Promise<boolean> {
+  // Installed but unused filters (for example Git for Windows' default LFS
+  // registration) are not repository policy. Check actual file attributes
+  // without invoking status, clean, process, fsmonitor or diff helpers.
+  const names = await git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
+  if (!names) return false;
+  const attributes = await new Promise<string>((resolve, reject) => {
+    const child = execFile("git", ["-c", "core.fsmonitor=false", "check-attr", "-z", "--stdin", "filter"],
+      { cwd: root, env: environment(), timeout: 15_000, maxBuffer: 2 * 1024 * 1024 },
+      (error, stdout) => error ? reject(error) : resolve(stdout));
+    child.stdin?.on("error", reject);
+    child.stdin?.end(names);
+  });
+  const fields = attributes.split("\0");
+  for (let index = 2; index < fields.length; index += 3) {
+    if (!["unspecified", "unset"].includes(fields[index])) return true;
+  }
+  return false;
+}
+
 function validRef(ref: string): void {
   if (!ref || ref.length > 200 || ref.startsWith("-") || /[\x00-\x20\x7f]/.test(ref)) {
     throw new Error("invalid_ref");
@@ -71,11 +91,7 @@ export async function observeMergeInputs(input: MergeProbeInput): Promise<MergeO
   validRef(input.targetRef);
   const candidateRoot = await directory(input.candidateRoot);
   const sourceRoot = await directory(input.sourceRoot);
-  for (const root of [candidateRoot, sourceRoot]) {
-    try {
-      if (await git(root, ["config", "--get-regexp", "^filter\\..*\\.(clean|process)$"])) throw new Error("unsupported_source_filter");
-    } catch (error) { if ((error as { code?: number }).code !== 1) throw error; }
-  }
+  for (const root of [candidateRoot, sourceRoot]) if (await usesSourceFilter(root)) throw new Error("unsupported_source_filter");
   const commonDirectory = await realpath(await git(candidateRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
   const sourceCommon = await realpath(await git(sourceRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
   if (commonDirectory !== sourceCommon) throw new Error("foreign_repository");

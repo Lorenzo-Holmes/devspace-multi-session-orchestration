@@ -28,8 +28,11 @@ policy. A future merge executor must enforce the same policy and exact OID pair.
 The temporary merge-tree OID is not promised to remain available after cleanup.
 
 Source observations disable the optional filesystem-monitor helper and reject
-configured clean/process filters before inspecting worktree status. Neither a
-read-only observation nor merge simulation should launch those user helpers.
+actual file attributes selecting a source filter before inspecting worktree
+status. Installed but unused filters, including Git for Windows' default LFS
+registration, do not block ordinary repositories. Attribute selection is read
+without running a filter. Neither observation nor merge simulation should launch
+those user helpers.
 
 Git inputs are observed again before the database commit. This detects movement
 during the probe, but does not lock an arbitrary external Git writer after the

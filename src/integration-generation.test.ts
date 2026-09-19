@@ -125,6 +125,7 @@ for (const source of ["fsmonitor", "filter"] as const) {
     await writeFile(script, "require('node:fs').writeFileSync(" + JSON.stringify(marker) + ", 'executed'); process.exit(1);\n");
     const command = '"' + process.execPath + '" "' + script + '"';
     await exec("git", ["config", source === "fsmonitor" ? "core.fsmonitor" : "filter.custom.clean", command], { cwd: f.project });
+    if (source === "filter") await writeFile(join(f.project, ".gitattributes"), "* filter=custom\n");
     const result = await probeCandidateMerge({ candidateRoot: binding.worktreeRoot!, sourceRoot: f.project, candidateRef: "HEAD", targetRef: "HEAD" });
     assert.equal(result.conflictState, source === "filter" ? "unknown" : "clean");
     assert.equal(await access(marker).then(() => true, () => false), false);
@@ -143,4 +144,11 @@ test("late project overlap is not hidden behind 1001 historical sessions", async
   const result = await f.v2.integrations.gate(f.projectKey, record.id, record.revision);
   assert.equal(result.gates.noHighSeverityOverlap, false);
   assert.equal(result.mergeReady, false);
+});
+
+test("an installed but unused source filter does not block ordinary repositories", async t => {
+  const f = await v2Fixture(t), binding = await f.v2.bindings.provision(f.workspace, f.lease);
+  await exec("git", ["config", "filter.unused.clean", "unavailable-unused-helper"], { cwd: f.project });
+  const result = await probeCandidateMerge({ candidateRoot: binding.worktreeRoot!, sourceRoot: f.project, candidateRef: "HEAD", targetRef: "HEAD" });
+  assert.equal(result.conflictState, "clean");
 });
