@@ -24,7 +24,7 @@ test("AST extractor rejects dynamic/unclassified registrations instead of silent
 test("runtime guidance retains handlers and existing instructions without protocol extensions", () => {
   const index = read("src/tool-surfaces/index.ts");
   assert.match(index, /register: registerCodexTools/); assert.match(index, /register: registerClaudeTools/);
-  assert.match(index, /codexInstructions\(context\)/); assert.match(index, /claudeInstructions\(context\)/);
+  assert.match(index, /codexInstructions\(\)/); assert.match(index, /claudeInstructions\(context\)/);
   const guidance = read("src/tool-surfaces/control-plane-guidance.ts");
   assert.match(guidance, /advisory, not authorization/);
   assert.match(guidance, /A heartbeat is not model liveness/);

@@ -11,7 +11,7 @@ const TOOL_SURFACES: Record<ToolMode, ToolSurface> = {
   },
   codex: {
     register: registerCodexTools,
-    instructions: context => `${codexInstructions(context)}\n\n${CONTROL_PLANE_GUIDANCE}`,
+    instructions: () => `${codexInstructions()}\n\n${CONTROL_PLANE_GUIDANCE}`,
   },
 };
 
