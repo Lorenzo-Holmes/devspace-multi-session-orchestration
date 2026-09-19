@@ -270,6 +270,11 @@ export class OrchestrationRegistry {
     this.get(sessionId);
     return this.store.latestEvent(sessionId, kind);
   }
+
+  event(sessionId: string, eventId: number): OrchestrationEvent | undefined {
+    this.get(sessionId);
+    return this.store.getEvent(sessionId, eventId);
+  }
 }
 
 function cleanOptional(value: string | undefined): string | undefined {

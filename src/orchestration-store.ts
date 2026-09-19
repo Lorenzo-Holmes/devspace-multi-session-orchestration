@@ -347,6 +347,12 @@ export class OrchestrationStore {
       .get(sessionId, kind) as EventRow | undefined;
     return row ? eventFromRow(row) : undefined;
   }
+
+  getEvent(sessionId: string, eventId: number): OrchestrationEvent | undefined {
+    const row = this.database.sqlite.prepare("select * from orchestration_events where session_id = ? and id = ?")
+      .get(sessionId, eventId) as EventRow | undefined;
+    return row ? eventFromRow(row) : undefined;
+  }
 }
 
 export function normalizeIntentPath(path: string): string {

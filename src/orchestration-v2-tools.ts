@@ -48,8 +48,8 @@ export function registerOrchestrationV2Tools(server: McpServer, v2: Orchestratio
   register("worktree_cleanup_status", "Record cleanup eligibility for a terminal task. No files or worktrees are deleted.",
     { taskId: id, expectedRevision: revision }, false, (p, a) => v2.bindings.cleanup(p, a.taskId, a.expectedRevision));
   register("integration_create", "Create durable review metadata for a task worktree. Never merges, rebases, cherry-picks or pushes.",
-    { taskId: id, sessionId: id, candidateRef: integrationUpdateSchema.shape.candidateRef }, false,
-    (p, a) => v2.integrations.create(p, a.taskId, a.sessionId, a.candidateRef));
+    { taskId: id, sessionId: id, candidateRef: integrationUpdateSchema.shape.candidateRef, targetRef: integrationUpdateSchema.shape.targetRef }, false,
+    (p, a) => v2.integrations.create(p, a.taskId, a.sessionId, a.candidateRef, a.targetRef));
   register("integration_status", "Read the last integration gate snapshot; checkedAt identifies its freshness.", { integrationId: id }, true,
     (p, a) => v2.integrations.get(p, a.integrationId));
   register("integration_list", "List project integration records with bounded cursor pagination.", page, true,

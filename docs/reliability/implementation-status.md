@@ -32,7 +32,10 @@ its two commits above main changed CI only. Main was
   supplied integration evidence remain known issues; tests below do not certify them.
 - A3 follow-up: wire conservative journal recovery to the canonical runtime lifecycle;
   retain `recovery_uncertain` when an external writer's final state cannot be established.
-- A7/A8: generation-fenced integration evaluation and actual candidate/target merge simulation.
+- A7/A8: integration generations, current-binding/task/session rechecks, exact-ID
+  event lookup and isolated candidate/target merge simulation have an additional
+  implementation checkpoint. Validation is pending; canonical attempt/worker
+  fencing remains outstanding. See `integration-generation.md`.
 - A10/A11/A13: full project/logical-session/worker/attempt identities, worktree operation
   recovery and authoritative attempt-level fencing.
 - A14: handle-level/junction/directory-replacement filesystem containment.
