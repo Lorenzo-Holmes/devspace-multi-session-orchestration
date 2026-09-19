@@ -1,0 +1,60 @@
+{
+  "project": "Codex Native Goal external-only executor",
+  "protocol": "devspace.codex-native-goal-external/v1",
+  "executor": "chatgpt_web",
+  "automaticModelCallsAllowed": false,
+  "automaticChatMessagesAllowed": false,
+  "deploymentEnabled": false,
+  "nativeRuntimeImplemented": false,
+  "upstreamCommit": "b348fc26674189f758d5941cdab3f78f258b2aa7",
+  "taskFileKind": "implementation_handoff_plan_not_a_running_goal_or_scheduler",
+  "tasks": [
+    {
+      "id": "M0", "status": "completed", "dependsOn": [],
+      "title": "核查本机源目录、Git 状态和固定上游原生 Goal 边界",
+      "evidence": ["PLAN.zh-CN.md", "NATIVE-PATCH-SPEC.md"]
+    },
+    {
+      "id": "M1", "status": "completed_for_client_and_journal_scope", "dependsOn": ["M0"],
+      "title": "严格协议、外部客户端、持久化 intent 日志、拒绝危险回退测试",
+      "run": "scripts/test-native-external-goal.ps1",
+      "successScope": "client + real SQLite + protocol fixtures; not native runtime",
+      "evidence": "evidence/run-20260910-170420-118/result.json",
+      "tests": { "total": 31, "passed": 31, "failed": 0 },
+      "exitCodes": { "tests": 0, "isolatedTypecheck": 0, "fullTypecheck": 0, "offlineAudit": 0 }
+    },
+    {
+      "id": "M2.1", "status": "in_progress_not_accepted", "dependsOn": ["M1"],
+      "implementationWorkspace": "D:\\DevSpace-Native-Goal\\codex-external-only",
+      "branch": "devspace/external-only-m2",
+      "progressEvidence": [
+        "D:\\DevSpace-Native-Goal\\evidence\\run-20260910-195311-214-check-state",
+        "D:\\DevSpace-Native-Goal\\evidence\\run-20260910-195249-846-gate-run",
+        "D:\\DevSpace-Native-Goal\\evidence\\run-20260910-200947-037-test-state-full"
+      ],
+      "title": "隔离 fork 固定提交；全局 external-only 启动保护与模型 dispatch 拦截",
+      "acceptance": ["N03", "N09"],
+      "constraints": "不得调用模型验证；所有构建/缓存位于授权 D 盘目录，不触碰现有认证"
+    },
+    {
+      "id": "M2.2", "status": "not_started", "dependsOn": ["M2.1"],
+      "title": "原生 GoalStore 原子执行策略、revision、lease/fence、checkpoint 与幂等操作",
+      "acceptance": ["N01", "N02", "N04", "N05", "N06"]
+    },
+    {
+      "id": "M2.3", "status": "not_started", "dependsOn": ["M2.2"],
+      "title": "原生 app-server 新 RPC、源类型与生成 schema，对接 M1 客户端",
+      "acceptance": ["N01", "N02", "N09"]
+    },
+    {
+      "id": "M3", "status": "not_started", "dependsOn": ["M2.3"],
+      "title": "真实监督 transport、MCP 工具与 workspace/process 生命周期接入；跨 turn 验收",
+      "acceptance": ["N06", "N07", "N08", "N09"]
+    },
+    {
+      "id": "M4", "status": "not_started_optional", "dependsOn": ["M3"],
+      "title": "复用 Shrimp 任务 DAG；解耦真实业务决策卡，不创建影子 ChatGoal",
+      "acceptance": ["真实 Task A→用户卡片→Task B→handoff→新用户请求恢复→Task C"]
+    }
+  ]
+}

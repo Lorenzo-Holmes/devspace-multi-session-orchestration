@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "rootDir": ".", "noEmit": true },
+  "include": [
+    "src/native-external-goal-*.ts",
+    "src/native-external-goal.test.ts",
+    "scripts/audit-native-external-goal.ts"
+  ]
+}

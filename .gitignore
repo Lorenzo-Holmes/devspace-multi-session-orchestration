@@ -1,0 +1,12 @@
+node_modules/
+dist/
+releases/
+.env
+*.log
+.devspace-config/
+.devspace-state/
+.devspace-worktrees/
+.devspace.pid
+.goal-test-evidence/
+.card-lab-build/
+output/playwright/

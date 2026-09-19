@@ -1,0 +1,46 @@
+import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import test from "node:test";
+import { v2Fixture, exec } from "./test-support/orchestration-v2.js";
+import { OrchestrationV2 } from "./orchestration-v2.js";
+
+test("integration gates fail closed, collect commit-specific test evidence and preserve review across restart", async t => {
+  const f = await v2Fixture(t), binding = await f.v2.bindings.provision(f.workspace, f.lease);
+  const created = f.v2.integrations.create(f.projectKey, f.task.id, f.session.id);
+  let current = await f.v2.integrations.gate(f.projectKey, created.id, 1);
+  assert.equal(current.mergeReady, false);
+  assert.equal(current.gates.taskReady, false);
+  assert.equal(current.gates.testEvidence, false);
+  const cwd = binding.worktreeRoot!;
+  await writeFile(join(cwd, "same.txt"), "candidate\n");
+  await exec("git", ["add", "."], { cwd });
+  await exec("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "candidate"], { cwd });
+  const commit = (await exec("git", ["rev-parse", "HEAD"], { cwd })).stdout.trim();
+  const event = f.sessions.recordEvent({ sessionId: f.session.id, kind: "test_run", detail: { passed: true } }).event;
+  f.coordinator.complete(f.lease);
+  current = f.v2.integrations.update(f.projectKey, current.id, current.revision, { testEvidence: [{ eventId: event.id, commit }], reviewState: "approved" });
+  current = await f.v2.integrations.gate(f.projectKey, current.id, current.revision);
+  assert.equal(current.mergeReady, true);
+  assert.ok(Object.values(current.gates).every(Boolean));
+  assert.throws(() => f.v2.integrations.update(f.projectKey, current.id, 1, {}), /revision conflict/);
+  assert.throws(() => f.v2.integrations.get("other", current.id), /project scope/);
+  const restart = new OrchestrationV2(f.config, f.sessions, f.coordinator, f.workspaces, f.access);
+  try { assert.deepEqual(restart.integrations.get(f.projectKey, current.id), current); } finally { restart.close(); }
+  await writeFile(join(cwd, "same.txt"), "uncommitted\n");
+  current = await f.v2.integrations.gate(f.projectKey, current.id, current.revision);
+  assert.equal(current.mergeReady, false);
+  assert.equal(current.integrationWorktreeState, "dirty");
+  assert.equal((await exec("git", ["rev-parse", "HEAD"], { cwd })).stdout.trim(), commit);
+});
+
+test("integration rejects foreign bindings, invalid refs and unverified evidence", async t => {
+  const f = await v2Fixture(t);
+  await f.v2.bindings.provision(f.workspace, f.lease);
+  assert.throws(() => f.v2.integrations.create("other", f.task.id, f.session.id), /project scope/);
+  assert.throws(() => f.v2.integrations.create(f.projectKey, f.task.id, f.session.id, "--help"), /Ref/);
+  const item = f.v2.integrations.create(f.projectKey, f.task.id, f.session.id, "nonexistent");
+  const result = await f.v2.integrations.gate(f.projectKey, item.id, item.revision);
+  assert.equal(result.gates.candidateAvailable, false);
+  assert.equal(result.mergeReady, false);
+});

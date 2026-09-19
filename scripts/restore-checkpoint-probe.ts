@@ -1,0 +1,38 @@
+import { existsSync,mkdirSync,readFileSync,writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import assert from 'node:assert/strict';
+import { validateTasks,nextShrimpTask } from '../src/goal-shrimp-client.js';
+const base='D:/DevSpace-Goal-PoC/.poc/replan-v1';
+const originalRun='run-20260908-1252-e2e';
+const evidence=join(base,'evidence','recovery-at-A-lf');
+if(existsSync(evidence))throw new Error('Refusing overwrite');
+mkdirSync(evidence,{recursive:true});
+const project=join(base,'fixture',originalRun);
+const state='D:/AgentState/_poc/shrimp/replan-v1/'+originalRun;
+const result=JSON.parse(readFileSync(join(base,'evidence',originalRun,'result.json'),'utf8'));
+const a=result.checkpoints.find((c:any)=>c.taskId===result.calls[0].taskId&&c.stateCommit);
+assert.ok(a);
+const restoredProject=join(evidence,'project');
+const restoredState=join(evidence,'task-state');
+function archive(repo:string,sha:string,target:string,name:string){
+ const zip=join(evidence,name+'.zip');
+ execFileSync('git',['-C',repo,'-c','core.autocrlf=false','-c','core.eol=lf','archive','--format=zip',`--output=${zip}`,sha],{windowsHide:true});
+ mkdirSync(target);
+ execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',`Expand-Archive -LiteralPath '${zip}' -DestinationPath '${target}'`],{windowsHide:true});
+}
+archive(project,a.codeCommit,restoredProject,'code-at-A');
+archive(state,a.stateCommit,restoredState,'tasks-at-A');
+const restored=readFileSync(join(restoredState,'tasks.json'),'utf8');
+const hash=createHash('sha256').update(restored).digest('hex');
+assert.equal(hash,a.stateHash);
+const tasks=validateTasks(JSON.parse(restored));
+assert.equal(tasks[0].status,'completed');
+assert.equal(nextShrimpTask(tasks)?.name,'Task B');
+assert.ok(!existsSync(join(restoredProject,'words.mjs')),'B implementation is absent at actual A checkpoint');
+const moduleUrl=pathToFileURL(join(restoredProject,'normalize.mjs')).href;
+const output=execFileSync(process.execPath,['--input-type=module','-e',`import assert from 'node:assert/strict';import {normalizeText} from ${JSON.stringify(moduleUrl)};assert.equal(normalizeText('  hello\\t world '),'hello world');assert.equal(normalizeText(''),'');console.log('Restored A code verified');`],{encoding:'utf8',windowsHide:true});
+const report={result:'PASS',codeCommit:a.codeCommit,taskCommit:a.stateCommit,stateHash:hash,nextTask:'Task B',output,originalProjectsUntouched:true,note:'Fresh archive restoration. Original working tree and Shrimp state not reset or overwritten.'};
+writeFileSync(join(evidence,'result.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
