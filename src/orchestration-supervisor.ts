@@ -69,11 +69,11 @@ export function buildSupervisorSummary(s: SupervisorState, now = new Date()): Su
 }
 
 export function supervisorSummary(v2: OrchestrationV2, project: string, now = new Date()): SupervisorSummary {
-  const sessions = v2.sessions.list({ projectKey: project, limit: 500 });
-  return buildSupervisorSummary({ project, sessions, tasks: v2.coordinator.list(project),
+  const sessions = v2.sessions.all(project);
+  return buildSupervisorSummary({ project, sessions, tasks: v2.coordinator.all(project),
     readyTaskIds: v2.coordinator.readyQueue(project, now).map(task => task.id),
     events: Object.fromEntries(sessions.slice(0, 50).map(session => [session.id, v2.sessions.events(session.id, 10)])),
-    bindings: v2.bindings.list(project, 500), conflicts: detectOrchestrationConflicts(sessions, v2.sessions.fileIntents(), 500),
-    handoffs: v2.handoffs.list(project, 500), integrations: v2.integrations.list(project, 500), alerts: v2.watchdog.list(project, 500),
+    bindings: v2.store.all<WorktreeBinding>("worktree_bindings", project), conflicts: detectOrchestrationConflicts(sessions, v2.sessions.fileIntents(), Number.POSITIVE_INFINITY),
+    handoffs: v2.store.all<HandoffCheckpoint>("handoff_checkpoints", project), integrations: v2.store.all<IntegrationRecord>("integration_records", project), alerts: v2.store.all<WatchdogAlert>("watchdog_alerts", project),
   }, now);
 }

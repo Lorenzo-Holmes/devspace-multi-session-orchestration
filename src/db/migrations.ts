@@ -245,6 +245,16 @@ const migrations: Migration[] = [
       create index automation_due_work_project on automation_due_work(project_key, id);
     `),
   },
+  {
+    version: 19, name: "session-cas-and-mutation-generation",
+    up: sqlite => sqlite.exec(`
+      alter table orchestration_sessions add column revision integer not null default 1;
+      alter table orchestration_sessions add column incarnation integer not null default 1;
+      alter table orchestration_sessions add column binding_generation integer not null default 1;
+      alter table orchestration_sessions add column file_generation integer not null default 0;
+      create index orchestration_events_kind_idx on orchestration_events(session_id, kind, id desc);
+    `),
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {

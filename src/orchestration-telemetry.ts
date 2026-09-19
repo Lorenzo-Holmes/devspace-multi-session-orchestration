@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isAbsolute, relative } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OrchestrationRegistry } from "./orchestration-registry.js";
 import {
@@ -64,7 +65,7 @@ export function installOrchestrationTelemetry(
         return result;
       } catch (error) {
         if (scope) {
-          recordObservedError(registry, scope.sessionId, name, error);
+          recordObservedError(registry, scope.sessionId, name, error, args);
         }
         throw error;
       }
@@ -128,7 +129,7 @@ function ensureAutomaticSession(
   }
 }
 
-function recordObservedToolResult(
+export function recordObservedToolResult(
   registry: OrchestrationRegistry,
   sessionId: string,
   tool: string,
@@ -157,6 +158,25 @@ function recordObservedToolResult(
       return;
     }
 
+    if (FILE_MUTATION_TOOLS.has(tool)) {
+      const facts = observedMutationFacts(result);
+      const paths = observedMutationPaths(tool, args, result, registry.get(sessionId).workspaceRoot);
+      // Mutation is a fact about the tool result. Intents are a bounded advisory
+      // projection and are not allowed to suppress this durable observation.
+      if (!failed || facts.length > 0) {
+        registry.recordEvent({
+          sessionId, kind: "file_change",
+          detail: { tool, paths, facts, provenance: facts.length ? "tool_result" : "successful_tool_arguments", partial: failed },
+        });
+        try {
+          if (paths.length) registry.addFileIntents(sessionId, paths.map((path) => ({ path, access: "write" as const })));
+        } catch (error) {
+          registry.recordEvent({ sessionId, kind: "file_intents_projection_failed",
+            detail: { tool, observedPathCount: paths.length, message: error instanceof Error ? error.message : String(error) } });
+        }
+      }
+    }
+
     if (failed) {
       registry.recordEvent({
         sessionId,
@@ -169,20 +189,6 @@ function recordObservedToolResult(
       return;
     }
 
-    if (FILE_MUTATION_TOOLS.has(tool)) {
-      const paths = observedMutationPaths(tool, args);
-      if (paths.length > 0) {
-        registry.addFileIntents(
-          sessionId,
-          paths.map((path) => ({ path, access: "write" as const })),
-        );
-      }
-      registry.recordEvent({
-        sessionId,
-        kind: "file_change",
-        detail: { tool, paths },
-      });
-    }
   } catch {
     // Telemetry must never change primary tool behavior.
   }
@@ -193,8 +199,15 @@ function recordObservedError(
   sessionId: string,
   tool: string,
   error: unknown,
+  args?: unknown,
 ): void {
   try {
+    if (FILE_MUTATION_TOOLS.has(tool)) {
+      registry.recordEvent({ sessionId, kind: "file_change", detail: {
+        tool, mutationState: "uncertain", paths: observedMutationPaths(tool, args),
+        reason: "A mutating tool threw without a complete mutation receipt; do not assume no write occurred.",
+      } });
+    }
     registry.recordEvent({
       sessionId,
       kind: "error",
@@ -216,19 +229,34 @@ function trustedConversationId(extra: unknown): string | undefined {
   return openAiConversationScopeId(extra._meta);
 }
 
-function observedMutationPaths(tool: string, args: unknown): string[] {
-  if (!isRecord(args)) return [];
+function observedMutationFacts(result: unknown): Array<{ path: string; previousPath?: string; operation?: string }> {
+  if (!isRecord(result) || !isRecord(result.structuredContent) || !Array.isArray(result.structuredContent.files)) return [];
+  return result.structuredContent.files.filter(isRecord).flatMap((file) => typeof file.path === "string"
+    ? [{ path: file.path, previousPath: typeof file.previousPath === "string" ? file.previousPath : undefined,
+      operation: typeof file.operation === "string" ? file.operation : undefined }] : []);
+}
+
+function observedMutationPaths(tool: string, args: unknown, result?: unknown, root?: string): string[] {
   const candidates = new Set<string>();
+  const facts = observedMutationFacts(result);
+  for (const fact of facts) {
+    candidates.add(fact.path);
+    if (fact.previousPath) candidates.add(fact.previousPath);
+  }
+  if (facts.length > 0) return [...candidates].map(path => root && isAbsolute(path) ? relative(root, path) : path)
+    .map(path => path.replaceAll("\\", "/").replace(/^\.\//, ""));
+  if (!isRecord(args)) return [];
   if (typeof args.path === "string") candidates.add(args.path);
   if (typeof args.destinationPath === "string") candidates.add(args.destinationPath);
   if (typeof args.destination === "string") candidates.add(args.destination);
   if (tool === "apply_patch" && typeof args.patch === "string") {
-    const pattern = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm;
+    const pattern = /^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/gm;
     for (const match of args.patch.matchAll(pattern)) {
       if (match[1]) candidates.add(match[1].trim());
     }
   }
   return [...candidates]
+    .map(path => root && isAbsolute(path) ? relative(root, path) : path)
     .map((path) => path.replaceAll("\\", "/").replace(/^\.\//, ""))
     .filter((path) => path && path !== ".." && !path.startsWith("../"));
 }

@@ -30,6 +30,10 @@ export interface OrchestrationSession {
   lastHeartbeatAt?: string;
   lastActivityAt: string;
   lastTestAt?: string;
+  revision?: number;
+  incarnation?: number;
+  bindingGeneration?: number;
+  fileGeneration?: number;
   lastFileChangeAt?: string;
   lastErrorFingerprint?: string;
   consecutiveErrorCount: number;
@@ -65,6 +69,10 @@ interface SessionRow {
   last_heartbeat_at: string | null;
   last_activity_at: string;
   last_test_at: string | null;
+  revision: number;
+  incarnation: number;
+  binding_generation: number;
+  file_generation: number;
   last_file_change_at: string | null;
   last_error_fingerprint: string | null;
   consecutive_error_count: number;
@@ -119,6 +127,10 @@ export class OrchestrationStore {
       task: input.task,
       lastActivityAt: now,
       consecutiveErrorCount: 0,
+      revision: 1,
+      incarnation: 1,
+      bindingGeneration: 1,
+      fileGeneration: 0,
       createdAt: now,
       updatedAt: now,
     };
@@ -156,7 +168,7 @@ export class OrchestrationStore {
       if (session.workspaceId === workspaceId && session.workspaceRoot === resolve(workspaceRoot)) return session;
       // Intents refer to the previous physical workspace and must not migrate with the owner.
       this.database.sqlite.prepare("delete from orchestration_file_intents where session_id = ?").run(sessionId);
-      this.database.sqlite.prepare("update orchestration_sessions set workspace_id = ?, workspace_root = ? where id = ?")
+      this.database.sqlite.prepare("update orchestration_sessions set workspace_id = ?, workspace_root = ?, binding_generation = binding_generation + 1, revision = revision + 1 where id = ?")
         .run(workspaceId, resolve(workspaceRoot), sessionId);
       return this.getSession(sessionId)!;
     }).immediate();
@@ -206,12 +218,23 @@ export class OrchestrationStore {
     id: string,
     patch: Partial<Omit<OrchestrationSession, "id" | "createdAt" | "projectKey" | "workspaceRoot">>,
     now = new Date().toISOString(),
+    expectedRevision?: number,
   ): OrchestrationSession {
     const current = this.getSession(id);
     if (!current) throw new Error("Unknown orchestration session: " + id);
+    if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new Error("Session revision conflict.");
+    if (["completed", "failed", "abandoned"].includes(current.state) && patch.state && patch.state !== current.state) {
+      throw new Error("Terminal orchestration session cannot revive.");
+    }
     const updated: OrchestrationSession = { ...current, ...patch, updatedAt: now };
-    this.database.sqlite.prepare(
-      "update orchestration_sessions set workspace_id = ?, session_kind = ?, external_session_id = ?, label = ?, state = ?, task = ?, last_heartbeat_at = ?, last_activity_at = ?, last_test_at = ?, last_file_change_at = ?, last_error_fingerprint = ?, consecutive_error_count = ?, updated_at = ? where id = ?"
+    // A delayed heartbeat must never move durable activity backwards.
+    for (const key of ["lastHeartbeatAt", "lastActivityAt", "lastFileChangeAt", "lastTestAt", "updatedAt"] as const) {
+      if (current[key] && (!updated[key] || Date.parse(updated[key]!) < Date.parse(current[key]!))) updated[key] = current[key]!;
+    }
+    const result = this.database.sqlite.prepare(
+      `update orchestration_sessions set workspace_id = ?, session_kind = ?, external_session_id = ?, label = ?, state = ?, task = ?, last_heartbeat_at = ?, last_activity_at = ?, last_test_at = ?, last_file_change_at = ?, last_error_fingerprint = ?, consecutive_error_count = ?, updated_at = ?,
+       file_generation = ?, revision = revision + 1
+       where id = ? and revision = ? and incarnation = ?`
     ).run(
       updated.workspaceId ?? null,
       updated.sessionKind,
@@ -226,10 +249,17 @@ export class OrchestrationStore {
       updated.lastErrorFingerprint ?? null,
       updated.consecutiveErrorCount,
       updated.updatedAt,
+      updated.fileGeneration ?? 0,
       id,
+      current.revision,
+      current.incarnation,
     );
-    return updated;
+    if (result.changes !== 1) throw new Error("Session revision or incarnation conflict.");
+    return this.getSession(id)!;
   }
+
+  /** State and its required event must use this same connection and transaction. */
+  transaction<T>(operation: () => T): T { return this.database.sqlite.transaction(operation).immediate(); }
 
   appendEvent(input: {
     sessionId: string;
@@ -304,6 +334,19 @@ export class OrchestrationStore {
   close(): void {
     this.database.close();
   }
+
+  /** Internal complete input, separate from the bounded display query. */
+  allSessions(projectKey: string): OrchestrationSession[] {
+    const rows = this.database.sqlite.prepare("select * from orchestration_sessions where project_key = ? order by id")
+      .all(projectKey) as SessionRow[];
+    return rows.map(sessionFromRow);
+  }
+
+  latestEvent(sessionId: string, kind: string): OrchestrationEvent | undefined {
+    const row = this.database.sqlite.prepare("select * from orchestration_events where session_id = ? and kind = ? order by id desc limit 1")
+      .get(sessionId, kind) as EventRow | undefined;
+    return row ? eventFromRow(row) : undefined;
+  }
 }
 
 export function normalizeIntentPath(path: string): string {
@@ -327,6 +370,10 @@ function sessionFromRow(row: SessionRow): OrchestrationSession {
     lastHeartbeatAt: row.last_heartbeat_at ?? undefined,
     lastActivityAt: row.last_activity_at,
     lastTestAt: row.last_test_at ?? undefined,
+    revision: row.revision,
+    incarnation: row.incarnation,
+    bindingGeneration: row.binding_generation,
+    fileGeneration: row.file_generation,
     lastFileChangeAt: row.last_file_change_at ?? undefined,
     lastErrorFingerprint: row.last_error_fingerprint ?? undefined,
     consecutiveErrorCount: row.consecutive_error_count,

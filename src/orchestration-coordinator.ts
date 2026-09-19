@@ -85,11 +85,7 @@ export class OrchestrationCoordinator {
   }
 
   readyQueue(projectKey: string, now = new Date()): CoordinatorTask[] {
-    return this.store.listTasks(projectKey).filter((task) => {
-      if (task.state === "pending") return this.dependenciesComplete(task);
-      if (task.state !== "claimed" || !task.leaseExpiresAt) return false;
-      return Date.parse(task.leaseExpiresAt) <= now.getTime() && this.dependenciesComplete(task);
-    });
+    return this.store.readyTasks(projectKey, now.toISOString());
   }
 
   claim(input: {
@@ -176,6 +172,8 @@ export class OrchestrationCoordinator {
   close(): void {
     this.store.close();
   }
+
+  all(projectKey: string): CoordinatorTask[] { return this.store.allTasks(projectKey); }
 
   private dependenciesComplete(task: CoordinatorTask): boolean {
     return this.store.dependencyStates(task.id).every((dependency) => dependency.state === "completed");

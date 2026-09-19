@@ -1,4 +1,4 @@
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, posix, resolve, win32 } from "node:path";
 import {
   OrchestrationStore,
   type OrchestrationEvent,
@@ -99,6 +99,7 @@ export class OrchestrationRegistry {
     nextState: OrchestrationSessionState,
     options: { task?: string; label?: string; now?: string } = {},
   ): OrchestrationSession {
+    const result = this.store.transaction(() => {
     const current = this.get(sessionId);
     if (current.state !== nextState && !transitions[current.state].has(nextState)) {
       throw new Error(
@@ -114,6 +115,7 @@ export class OrchestrationRegistry {
         lastActivityAt: options.now ?? new Date().toISOString(),
       },
       options.now,
+      current.revision,
     );
     if (current.state !== nextState) {
       this.store.appendEvent({
@@ -123,20 +125,24 @@ export class OrchestrationRegistry {
         createdAt: options.now,
       });
     }
-    this.changed(updated.projectKey);
     return updated;
+    });
+    this.changed(result.projectKey);
+    return result;
   }
 
   heartbeat(
     sessionId: string,
     options: { now?: string; detail?: Record<string, unknown> } = {},
   ): OrchestrationSession {
-    this.get(sessionId);
+    const result = this.store.transaction(() => {
+    const current = this.get(sessionId);
     const now = options.now ?? new Date().toISOString();
     const updated = this.store.updateSession(
       sessionId,
       { lastHeartbeatAt: now, lastActivityAt: now },
       now,
+      current.revision,
     );
     this.store.appendEvent({
       sessionId,
@@ -144,8 +150,10 @@ export class OrchestrationRegistry {
       detail: options.detail ?? {},
       createdAt: now,
     });
-    this.changed(updated.projectKey);
     return updated;
+    });
+    this.changed(result.projectKey);
+    return result;
   }
 
   recordEvent(input: {
@@ -154,11 +162,15 @@ export class OrchestrationRegistry {
     detail?: Record<string, unknown>;
     now?: string;
   }): { session: OrchestrationSession; event: OrchestrationEvent } {
+    const result = this.store.transaction(() => {
     const current = this.get(input.sessionId);
     const now = input.now ?? new Date().toISOString();
     const detail = input.detail ?? {};
     const patch: Partial<OrchestrationSession> = { lastActivityAt: now };
-    if (input.kind === "file_change") patch.lastFileChangeAt = now;
+    if (input.kind === "file_change") {
+      patch.lastFileChangeAt = now;
+      patch.fileGeneration = (current.fileGeneration ?? 0) + 1;
+    }
     if (input.kind === "test_run") patch.lastTestAt = now;
     if (input.kind === "error") {
       const fingerprint = typeof detail.fingerprint === "string" && detail.fingerprint.trim()
@@ -183,15 +195,17 @@ export class OrchestrationRegistry {
         ? current.consecutiveErrorCount + 1
         : 1;
     }
-    const session = this.store.updateSession(input.sessionId, patch, now);
+    const session = this.store.updateSession(input.sessionId, patch, now, current.revision);
     const event = this.store.appendEvent({
       sessionId: input.sessionId,
       kind: input.kind,
       detail,
       createdAt: now,
     });
-    this.changed(session.projectKey);
     return { session, event };
+    });
+    this.changed(result.session.projectKey);
+    return result;
   }
 
   events(sessionId: string, limit = 100): OrchestrationEvent[] {
@@ -205,19 +219,25 @@ export class OrchestrationRegistry {
     now?: string,
   ): OrchestrationFileIntent[] {
     this.get(sessionId);
-    if (intents.length > 200) throw new Error("At most 200 file intents are allowed per session.");
+    const normalizedIntents = new Map<string, { path: string; access: OrchestrationFileAccess }>();
     for (const intent of intents) {
-      const normalized = intent.path.replaceAll("\\", "/").replace(/^\.\//, "");
-      if (!normalized || normalized.length > 500 || isAbsolute(intent.path) || normalized === ".." || normalized.startsWith("../")) {
+      const normalized = posix.normalize(intent.path.replaceAll("\\", "/")).replace(/\/+$/, "");
+      if (!normalized || normalized === "." || normalized.length > 500 || isAbsolute(intent.path) || win32.isAbsolute(intent.path)
+        || /^[a-z]:/i.test(intent.path) || /[\x00-\x1f]/.test(intent.path) || normalized === ".." || normalized.startsWith("../")) {
         throw new Error("File intents must be non-empty workspace-relative paths without parent traversal.");
       }
+      normalizedIntents.set(intent.access + "\0" + normalized, { path: normalized, access: intent.access });
     }
-    const stored = this.store.replaceFileIntents(sessionId, intents, now);
+    if (normalizedIntents.size > 200) throw new Error("At most 200 file intents are allowed per session.");
+    const stored = this.store.transaction(() => {
+    const value = this.store.replaceFileIntents(sessionId, [...normalizedIntents.values()], now);
     this.store.appendEvent({
       sessionId,
       kind: "file_intents",
-      detail: { count: stored.length },
+      detail: { count: value.length },
       createdAt: now,
+    });
+    return value;
     });
     this.changed(this.get(sessionId).projectKey);
     return stored;
@@ -242,6 +262,13 @@ export class OrchestrationRegistry {
 
   close(): void {
     this.store.close();
+  }
+
+  all(projectKey: string): OrchestrationSession[] { return this.store.allSessions(projectKey); }
+
+  latestEvent(sessionId: string, kind: string): OrchestrationEvent | undefined {
+    this.get(sessionId);
+    return this.store.latestEvent(sessionId, kind);
   }
 }
 
