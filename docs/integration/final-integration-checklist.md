@@ -93,8 +93,7 @@ after every rebase.
 
 ## H — E2E / chaos gate
 
-- [ ] Create the Draft PR when the platform permits it; the branch is already
-      pushed at `08a487d`.
+- [x] Draft PR #10 exists for the pushed `08a487d` head.
 - [ ] Rebase on final production core.
 - [ ] Replace old `testEvidence(eventId, commit)` journey setup with A trusted
       execution Evidence IDs.

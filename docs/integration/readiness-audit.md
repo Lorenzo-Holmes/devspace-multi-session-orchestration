@@ -29,13 +29,12 @@ not activate unattended ChatGPT takeover.
 | E Auto Rollover | `pro/auto-session-rollover` | #2 Draft → A | `1b1599191b98` | 4 | 19; +1172/-0 | **PREPARATORY / BLOCKED** |
 | F Doctor | `pro/runtime-doctor-host-compatibility` | #7 Draft → `main` | `67e4644c876a` | 1 | 4; +687/-28 | IMPLEMENTED_PARTIALLY_VERIFIED |
 | G Runtime Resilience | `pro/runtime-resilience` | #4 Draft → `main` | `8221f84b7128` | 5 | 39; +3292/-827 | IMPLEMENTED_PARTIALLY_VERIFIED |
-| H E2E/Chaos | `pro/e2e-product-journeys` | **no PR** | `08a487d4d47f` | 1 | 7; +290/-0 | IMPLEMENTED_PARTIALLY_VERIFIED |
-| I Integration | `pro/integration-readiness` | none at audit start | `5b0fefa68e0f` | 0 | 0 | audit branch being populated by this commit |
+| H E2E/Chaos | `pro/e2e-product-journeys` | #10 Draft → `main` | `08a487d4d47f` | 1 | 7; +290/-0 | IMPLEMENTED_PARTIALLY_VERIFIED |
+| I Integration | `pro/integration-readiness` | #9 Draft → `main` | `14dbce297eaa` | 1 | 2; +364/-0 before this refresh | IMPLEMENTED_PARTIALLY_VERIFIED |
 | J Security | `pro/security-adversarial-audit` | #8 Draft → `main` | `27bfb14e2529` | 1 | 5; +244/-0 | IMPLEMENTED_PARTIALLY_VERIFIED |
 
-H PR creation was attempted once and was blocked by the platform safety layer.
-It was not retried through another tool/path. The branch itself is pushed and is
-therefore real remote work; PR creation remains an explicit blocked follow-up.
+H now has Draft PR #10. PR creation succeeded without changing or merging any
+branch. All ten active PRs remain Draft.
 
 `codex/github-write-test@470b278` is a write-permission probe and is superseded
 for product purposes. `codex/v2.1-hardening@5b0fefa` is identical to main and is
@@ -109,29 +108,27 @@ do not rely only on static source matching.
 
 ## I7 — validation truth
 
-GitHub CI truth at this audit point:
+GitHub CI truth at this refreshed audit point:
 
 - `main` latest push: install PASS, typecheck PASS, tests FAIL on all three OS
   lanes, build/doctor SKIPPED.
-- PRs #1–#7: GitHub Smoke is red. Their failures substantially overlap the
-  already-red main test clusters; A also shows additional hardening-test failures
-  on CI and cannot be waived as baseline-only.
-- PR #8: all three Smoke lanes completed FAILURE.
-- H has no PR, so no GitHub PR workflow exists for its pushed head.
+- PRs #1–#10: every currently reported Smoke lane is FAILURE on ubuntu-latest,
+  macos-latest and windows-latest. This includes the newly created H PR #10.
+  These red checks cannot be waived merely because `main` is already red.
 
 Independent local Windows validation performed during this build:
 
 | Branch | Focused/full tests | Typecheck | Build / UI | Important limits |
 | --- | --- | --- | --- | --- |
-| A | focused latest A10–A16 suite **32/32 PASS**, 0 skip; A ledger records full 369 total / 356 pass / 0 fail / 13 skip | PASS | branch ledger records PASS; SKIP stays SKIP | A14 handle-level replacement race remains unproven |
+| A | branch ledger at `a7cd287` records full **369 total / 356 pass / 0 fail / 13 skip** after A10–A14; a duplicate focused run in this continuation lost its final process receipt and is therefore UNKNOWN, not an additional PASS | branch ledger records PASS | branch ledger records PASS; SKIP stays SKIP | A14 handle-level replacement race remains unproven; A3 runtime recovery remains follow-up |
 | B | NOT_RUN in this final session | GitHub step reaches tests | GitHub build skipped | remote CI red |
 | C | NOT_RUN in this final session | GitHub step reaches tests | GitHub build skipped | remote CI red; must refresh A schemas |
-| D | visual contract **3/3 PASS**; real Playwright diagnostic smoke light/dark/narrow PASS | PASS | `build:chat-card` PASS; full build PASS | Browser Use parity BLOCKED by local CUA runner |
+| D | visual contract **3/3 PASS**, 0 skip in this continuation; branch docs also record real visual smoke evidence | PASS | `build:chat-card` PASS; full build PASS | current host also exposes an unsupported Node 22.17 installation, so exact release validation must pin a supported Node runtime |
 | E | NOT_RUN after latest A | not certified against latest A | NOT_RUN | preparatory only; 9 A commits behind |
-| F | Doctor **4/4 PASS** plus real compiled CLI runtime/browser category smoke | PASS | full build PASS | host Browser attachment correctly remains UNKNOWN |
+| F | Doctor **4/4 PASS**, 0 skip under verified Node 24.19.0 | PASS under Node 24.19.0 | full build PASS under a PATH with Node 24.19.0 first | host Browser attachment correctly remains UNKNOWN; no approval/OAuth action was taken |
 | G | NOT_RUN in this final session | GitHub step reaches tests | GitHub build skipped | remote CI red |
-| H | new product/chaos suite **8/8 PASS**, 0 skip | PASS | build NOT_RUN (tests/docs branch) | real Browser/remote MCP/human approval BLOCKED/NOT_IMPLEMENTED |
-| J | focused security + Supervisor XSS + SQLite read-only **9/9 PASS**, 0 skip | PASS | build NOT_RUN (tests/docs branch) | 3 PASS cases deliberately reproduce main vulnerabilities |
+| H | product/chaos suite **8/8 PASS**, 0 skip under verified Node 24.19.0 | PASS | build NOT_RUN (tests/docs branch) | real Browser/remote MCP/human approval remain BLOCKED/NOT_IMPLEMENTED; tests are explicitly labelled isolated where applicable |
+| J | adversarial orchestration suite **5/5 PASS**, 0 skip under verified Node 24.19.0 | PASS | build NOT_RUN (tests/docs branch) | 3 PASS cases deliberately reproduce main vulnerabilities; A contains candidate fixes for all three |
 
 Local validation does not override red GitHub checks.
 
@@ -145,8 +142,9 @@ Those 13 skips remain SKIP and do not repair the red GitHub-hosted baseline.
 Pure Git three-way simulation used `git merge-tree --write-tree`; no merge commit
 was pushed and no branch ref was advanced.
 
-The sequence **A → G → F → B → C → H → J** was textually clean at every step.
-Adding D after C produced a deterministic content conflict in
+The refreshed sequence **A → G → F → B → C → H → J** was textually clean at
+every step using synthetic commits created only in the local Git object database;
+no ref was advanced and no merge commit was pushed. Adding D after C produced a deterministic content conflict in
 `scripts/supervisor/card.html`; reversing D/C produced the same conflict. A + E
 also produced a clean merge tree.
 
@@ -218,5 +216,7 @@ No other PR base retarget is currently required.
 5. H/J are semantically stale after A despite textually clean Git merges.
 6. Real Browser Use acceptance is blocked in this environment by the local CUA
    Windows runner-pipe failure; no desktop fallback was used.
-7. H Draft PR creation remains platform-blocked even though its branch is pushed.
+7. B/C/G have substantive remote implementations but were not re-executed in
+   this continuation; their current GitHub Smoke lanes remain red and require
+   exact-head reruns after rebases.
 
