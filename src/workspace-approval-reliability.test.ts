@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -16,9 +16,10 @@ function barrier() {
 }
 
 async function fixture(t: TestContext) {
-  const root = await mkdtemp(join(tmpdir(), "devspace-approval-cas-"));
-  const project = join(root, "requested"), allowed = join(root, "allowed");
-  await mkdir(project); await mkdir(allowed);
+  const root = await realpath(await mkdtemp(join(tmpdir(), "devspace-approval-cas-")));
+  const projectPath = join(root, "requested"), allowedPath = join(root, "allowed");
+  await mkdir(projectPath); await mkdir(allowedPath);
+  const project = await realpath(projectPath), allowed = await realpath(allowedPath);
   const config = loadConfig(writeTestDevspaceConfig(join(root, "config"), {
     workspaces: { allowedRoots: [allowed], worktreeRoot: join(root, "worktrees") },
     storage: { stateDir: join(root, "state") },

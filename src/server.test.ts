@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -1439,12 +1439,13 @@ async function fixture(
     computerApprovals?: ComputerUseApprovals;
   } = {},
 ): Promise<ServerFixture> {
-  const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
-  const project = join(root, "project");
+  const root = await realpath(await mkdtemp(join(tmpdir(), "devspace-server-test-")));
+  const projectPath = join(root, "project");
   const agentDir = join(root, "agent");
   const stateDir = join(root, ".state");
 
-  await mkdir(join(project, ".devspace", "agents"), { recursive: true });
+  await mkdir(join(projectPath, ".devspace", "agents"), { recursive: true });
+  const project = await realpath(projectPath);
   await mkdir(agentDir, { recursive: true });
   await writeFile(join(agentDir, "AGENTS.md"), "global instructions\n");
   await writeFile(join(project, "AGENTS.md"), "project instructions\n");
