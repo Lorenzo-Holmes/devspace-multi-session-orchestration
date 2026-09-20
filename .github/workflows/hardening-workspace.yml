@@ -31,9 +31,15 @@ jobs:
       - name: Setup pnpm and Node
         uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2
         with:
-          runtime: node@22
+          runtime: node@24.19.0
           cache: true
           install: false
+      - name: Runtime versions
+        shell: bash
+        run: |
+          node --version
+          node -p "'ABI=' + process.versions.modules + ' executable=' + process.execPath"
+          pnpm --version
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
       - name: Archive disposable dependency environment
