@@ -37,6 +37,7 @@ function paint() {
       : lifetimeEnded && !snapshot?.waitOutcome && snapshot?.state === "pending" ? "本卡片的 60 秒观察窗口已结束；已锁定，不自动重新测试。"
         : presentation?.text ?? "正在连接诊断宿主…");
   status.classList.toggle("error", Boolean(lockedError));
+  status.dataset.tone = lockedError ? "danger" : snapshot?.waitOutcome === "answer_received" ? "success" : "neutral";
   for (const button of buttons) button.disabled = busy || attempted || !synced || Boolean(lockedError) || lifetimeEnded || !presentation?.canSubmit;
   choicePrompt.textContent = lockedError ? "卡片数据校验失败，当前无法选择。" : !snapshot ? "正在接收本次测试数据，请稍候。" : attempted || snapshot.state !== "pending" || snapshot.waitOutcome ? "本次操作已结束或已提交，无需再次选择。" : "请选择一个测试标记。";
   syncNote.textContent = `界面状态查询 ${reads}/6 次；有界查询不延长原等待，也不发送聊天消息。不能据此承诺免用量。`;
@@ -73,6 +74,7 @@ async function sync(final = false) {
 }
 for (const [label, answer] of [["蓝色标记", "BLUE"], ["绿色标记", "GREEN"], ["取消诊断", "CANCEL"]]) {
   const button = document.createElement("button"); button.textContent = label; button.disabled = true;
+  button.className = answer === "CANCEL" ? "ds-button" : "ds-button ds-button-primary";
   button.addEventListener("click", () => void submit(answer)); choices.append(button); buttons.push(button);
 }
 app.ontoolresult = (r: CallToolResult) => {

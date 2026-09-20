@@ -3,6 +3,13 @@
   font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
   background: transparent;
   color: var(--color-text-primary, #f5f5f6);
+  --ds-radius-card: 12px;
+  --ds-radius-control: 9px;
+  --ds-motion-fast: 140ms;
+  --ds-motion-standard: 190ms;
+  --ds-state-success: var(--color-success-text, #6fda83);
+  --ds-state-warning: var(--color-warning-text, #e6b566);
+  --ds-state-danger: var(--color-danger-text, #ee7676);
   --tool-card-border: color-mix(in srgb, var(--color-border-primary, #414141) 74%, transparent);
   --tool-card-header-bg: color-mix(in srgb, var(--color-background-secondary, #272727) 88%, transparent);
   --tool-card-body-bg: color-mix(in srgb, var(--color-background-primary, #181818) 94%, transparent);
@@ -36,7 +43,7 @@ body {
   width: 100%;
   overflow: hidden;
   border: 1px solid var(--tool-card-border);
-  border-radius: 12px;
+  border-radius: var(--ds-radius-card);
   background: var(--tool-card-header-bg);
   box-shadow: none;
   color: var(--color-text-primary, #f5f5f6);
@@ -143,7 +150,7 @@ body {
   min-height: 38px;
   padding: 8px 10px;
   border: 1px solid var(--tool-card-border);
-  border-radius: 9px;
+  border-radius: var(--ds-radius-control);
   background: var(--tool-card-header-bg);
   color: var(--color-text-primary, #f5f5f6);
   font: inherit;
@@ -329,9 +336,9 @@ body {
   border-radius: 7px;
   color: var(--color-text-tertiary, #a3a3aa);
   transition:
-    background 140ms ease,
-    color 140ms ease,
-    transform 140ms ease;
+    background var(--ds-motion-fast) ease,
+    color var(--ds-motion-fast) ease,
+    transform var(--ds-motion-fast) ease;
 }
 
 .tool-header:hover:not(:disabled) .chevron {
@@ -974,5 +981,38 @@ body {
   .workspace-row > .workspace-chip-list,
   .workspace-row > .workspace-instructions-content {
     grid-column: 2;
+  }
+}
+
+@media (max-width: 360px) {
+  .tool-header,
+  .review-header {
+    grid-template-columns: 32px minmax(0, 1fr) 16px;
+    gap: 7px;
+  }
+
+  .tool-icon {
+    width: 32px;
+    height: 32px;
+  }
+
+  .header-meta,
+  .stats {
+    display: none;
+  }
+
+  .workspace-row {
+    padding-inline: 9px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
   }
 }
