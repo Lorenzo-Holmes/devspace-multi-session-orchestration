@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -248,7 +248,7 @@ test("orchestration tools register, heartbeat, monitor and detect conflicts with
 });
 
 test("automatic orchestration telemetry records trusted tool activity without explicit session calls", async (t) => {
-  const context = await fixture(t, { toolMode: "codex" });
+  const context = await fixture(t, { toolMode: "codex", git: true });
   const conversation = "auto-telemetry-conversation";
   const opened = structuredContent(await callOpen(
     context.client,
@@ -297,11 +297,46 @@ test("automatic orchestration telemetry records trusted tool activity without ex
   } as Parameters<Client["callTool"]>[0]);
   assert.notEqual(patched.isError, true);
 
-  const validation = await context.client.callTool({
+  const falsePositive = await context.client.callTool({
     name: "exec_command",
     arguments: {
       workspaceId,
       cmd: "node --test --help",
+      yieldTimeMs: 10000,
+      maxOutputTokens: 2000,
+    },
+    _meta: { "openai/session": conversation },
+  } as Parameters<Client["callTool"]>[0]);
+  assert.notEqual(falsePositive.isError, true);
+
+  const afterHelp = structuredContent(await context.client.callTool({
+    name: "session_events",
+    arguments: { workspaceId, sessionId, limit: 100 },
+  }));
+  assert.doesNotMatch(String(afterHelp.eventsJson), /test_run/);
+
+  const addedTest = await context.client.callTool({
+    name: "apply_patch",
+    arguments: {
+      workspaceId,
+      patch: [
+        "*** Begin Patch",
+        "*** Add File: auto-validation.test.mjs",
+        "+import test from 'node:test';",
+        "+import assert from 'node:assert/strict';",
+        "+test('real validation', () => assert.equal(2 + 3, 5));",
+        "*** End Patch",
+      ].join("\n"),
+    },
+    _meta: { "openai/session": conversation },
+  } as Parameters<Client["callTool"]>[0]);
+  assert.notEqual(addedTest.isError, true);
+
+  const validation = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspaceId,
+      cmd: "node --test auto-validation.test.mjs",
       yieldTimeMs: 10000,
       maxOutputTokens: 2000,
     },
@@ -332,6 +367,7 @@ test("automatic orchestration telemetry records trusted tool activity without ex
   assert.match(eventJson, /test_run/);
   assert.match(eventJson, /error/);
   assert.match(eventJson, /"passed":true/);
+  assert.match(eventJson, /"trustLevel":"execution_observed"/);
 
   const parsedStatus = JSON.parse(String(status.sessionJson)) as {
     lastHeartbeatAt?: string;
@@ -862,6 +898,14 @@ test("Computer Use exposes native desktop and trusted browser Codex CUA tools wh
   });
   const tools = await context.client.listTools();
   const names = tools.tools.map((tool) => tool.name);
+  if (process.platform !== "win32") {
+    // Production only constructs/registers Codex CUA on Windows. Non-Windows
+    // hosts must fail closed instead of advertising unusable desktop/browser tools.
+    for (const name of ["observe", "computer", "browser_state", "browser_observe", "browser_action"]) {
+      assert.equal(names.includes(name), false);
+    }
+    return;
+  }
   assert.ok(names.includes("observe"));
   assert.ok(names.includes("computer"));
   assert.ok(names.includes("browser_state"));
@@ -913,6 +957,12 @@ test("browser_state forwards real ChatGPT MCP scope as Codex Browser Use turn me
     computerUseEnabled: true,
     codexCua: bridge,
   });
+  if (process.platform !== "win32") {
+    const names = (await context.client.listTools()).tools.map((tool) => tool.name);
+    assert.equal(names.includes("browser_state"), false);
+    assert.equal(observedMetadata.length, 0);
+    return;
+  }
   const opened = structuredContent(await callOpen(context.client, context.project, "browser-chat-session"));
   const result = await context.client.callTool({
     name: "browser_state",
@@ -1389,12 +1439,13 @@ async function fixture(
     computerApprovals?: ComputerUseApprovals;
   } = {},
 ): Promise<ServerFixture> {
-  const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
-  const project = join(root, "project");
+  const root = await realpath(await mkdtemp(join(tmpdir(), "devspace-server-test-")));
+  const projectPath = join(root, "project");
   const agentDir = join(root, "agent");
   const stateDir = join(root, ".state");
 
-  await mkdir(join(project, ".devspace", "agents"), { recursive: true });
+  await mkdir(join(projectPath, ".devspace", "agents"), { recursive: true });
+  const project = await realpath(projectPath);
   await mkdir(agentDir, { recursive: true });
   await writeFile(join(agentDir, "AGENTS.md"), "global instructions\n");
   await writeFile(join(project, "AGENTS.md"), "project instructions\n");

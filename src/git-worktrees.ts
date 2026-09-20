@@ -33,6 +33,69 @@ export interface ManagedWorktree {
   managed: boolean;
 }
 
+export interface PreparedManagedWorktree extends ManagedWorktree {}
+
+/** Resolves every mutable Git input before a worktree-creation side effect. */
+export async function prepareManagedWorktree(input: {
+  sourcePath: string;
+  baseRef?: string;
+  config: ServerConfig;
+  allowedRoots?: string[];
+  managedKey?: string;
+}): Promise<PreparedManagedWorktree> {
+  const allowedRoots = input.allowedRoots ?? input.config.allowedRoots;
+  const sourcePath = assertAllowedPath(input.sourcePath, allowedRoots);
+  try {
+    const sourceStats = await stat(sourcePath);
+    if (!sourceStats.isDirectory()) throw new Error("not_directory");
+  } catch {
+    throw new GitWorktreeError(
+      "GIT_REPOSITORY_NOT_FOUND",
+      `Cannot open workspace in worktree mode because the source path does not exist or is not a directory: ${input.sourcePath}`,
+    );
+  }
+  const sourceRoot = await resolveGitRoot(sourcePath, allowedRoots);
+  const baseRef = input.baseRef ?? "HEAD";
+  const baseSha = await resolveBaseCommit(sourceRoot, baseRef);
+  const dirtySource = (await git(["status", "--porcelain=v1"], sourceRoot)).trim().length > 0;
+  const path = managedWorktreePath({ worktreeRoot: input.config.worktreeRoot, repoRoot: sourceRoot, managedKey: input.managedKey });
+  assertAllowedPath(path, [input.config.worktreeRoot]);
+  return { sourceRoot, path, baseRef, baseSha, dirtySource, detached: true, managed: true };
+}
+
+/** Materializes or validates exactly the immutable prepared worktree. */
+export async function materializeManagedWorktree(input: {
+  prepared: PreparedManagedWorktree;
+  config: ServerConfig;
+}): Promise<ManagedWorktree> {
+  const prepared = input.prepared;
+  assertAllowedPath(prepared.path, [input.config.worktreeRoot]);
+  const resolved = await resolveBaseCommit(prepared.sourceRoot, prepared.baseSha);
+  if (resolved !== prepared.baseSha) throw new Error("Prepared worktree base commit changed unexpectedly.");
+  await mkdir(input.config.worktreeRoot, { recursive: true });
+
+  const present = await lstat(prepared.path).catch(() => undefined);
+  if (present) {
+    if (!present.isDirectory() || present.isSymbolicLink()) throw new Error("Managed worktree path is not a directory owned by this provision.");
+    const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], prepared.sourceRoot)).trim();
+    const candidateCommon = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], prepared.path)).trim();
+    const head = (await git(["rev-parse", "HEAD"], prepared.path)).trim();
+    const topLevel = (await git(["rev-parse", "--show-toplevel"], prepared.path)).trim();
+    if (resolve(common) !== resolve(candidateCommon) || head !== prepared.baseSha
+      || await realpath(topLevel) !== await realpath(prepared.path)) {
+      throw new Error("Managed worktree recovery requires the original repository and base commit; existing files were preserved.");
+    }
+    return prepared;
+  }
+  try {
+    await git(["worktree", "add", "--detach", prepared.path, prepared.baseSha], prepared.sourceRoot);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new GitWorktreeError("GIT_WORKTREE_CREATE_FAILED", `Git failed to create the managed worktree. ${message}`);
+  }
+  return prepared;
+}
+
 export async function createManagedWorktree(input: {
   sourcePath: string;
   baseRef?: string;
@@ -40,70 +103,8 @@ export async function createManagedWorktree(input: {
   allowedRoots?: string[];
   managedKey?: string;
 }): Promise<ManagedWorktree> {
-  const allowedRoots = input.allowedRoots ?? input.config.allowedRoots;
-  const sourcePath = assertAllowedPath(input.sourcePath, allowedRoots);
-
-  try {
-    const sourceStats = await stat(sourcePath);
-    if (!sourceStats.isDirectory()) {
-      throw new GitWorktreeError(
-        "GIT_REPOSITORY_NOT_FOUND",
-        `Cannot open workspace in worktree mode because the source path is not a directory: ${input.sourcePath}`,
-      );
-    }
-  } catch (error) {
-    if (error instanceof GitWorktreeError) throw error;
-    throw new GitWorktreeError(
-      "GIT_REPOSITORY_NOT_FOUND",
-      `Cannot open workspace in worktree mode because the source path does not exist: ${input.sourcePath}`,
-    );
-  }
-
-  const sourceRoot = await resolveGitRoot(sourcePath, allowedRoots);
-  const baseRef = input.baseRef ?? "HEAD";
-  const baseSha = await resolveBaseCommit(sourceRoot, baseRef);
-  const dirtySource = (await git(["status", "--porcelain=v1"], sourceRoot)).trim().length > 0;
-  const worktreePath = managedWorktreePath({
-    worktreeRoot: input.config.worktreeRoot,
-    repoRoot: sourceRoot,
-    managedKey: input.managedKey,
-  });
-
-  await mkdir(input.config.worktreeRoot, { recursive: true });
-  assertAllowedPath(worktreePath, [input.config.worktreeRoot]);
-
-  if (input.managedKey && await lstat(worktreePath).catch(() => undefined)) {
-    const info = await lstat(worktreePath);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Managed worktree path is not a directory owned by this provision.");
-    const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], sourceRoot)).trim();
-    const candidateCommon = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], worktreePath)).trim();
-    const head = (await git(["rev-parse", "HEAD"], worktreePath)).trim();
-    const topLevel = (await git(["rev-parse", "--show-toplevel"], worktreePath)).trim();
-    if (resolve(common) !== resolve(candidateCommon) || head !== baseSha || await realpath(topLevel) !== await realpath(worktreePath)) {
-      throw new Error("Managed worktree recovery requires the original repository and base commit; existing files were preserved.");
-    }
-    return { sourceRoot, path: worktreePath, baseRef, baseSha, dirtySource, detached: true, managed: true };
-  }
-
-  try {
-    await git(["worktree", "add", "--detach", worktreePath, baseSha], sourceRoot);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new GitWorktreeError(
-      "GIT_WORKTREE_CREATE_FAILED",
-      `Git failed to create the managed worktree. ${message}`,
-    );
-  }
-
-  return {
-    sourceRoot,
-    path: worktreePath,
-    baseRef,
-    baseSha,
-    dirtySource,
-    detached: true,
-    managed: true,
-  };
+  const prepared = await prepareManagedWorktree(input);
+  return materializeManagedWorktree({ prepared, config: input.config });
 }
 
 async function resolveGitRoot(path: string, allowedRoots: string[]): Promise<string> {

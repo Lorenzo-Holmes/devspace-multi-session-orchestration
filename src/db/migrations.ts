@@ -245,6 +245,114 @@ const migrations: Migration[] = [
       create index automation_due_work_project on automation_due_work(project_key, id);
     `),
   },
+  {
+    version: 19, name: "session-cas-and-mutation-generation",
+    up: sqlite => sqlite.exec(`
+      alter table orchestration_sessions add column revision integer not null default 1;
+      alter table orchestration_sessions add column incarnation integer not null default 1;
+      alter table orchestration_sessions add column binding_generation integer not null default 1;
+      alter table orchestration_sessions add column file_generation integer not null default 0;
+      create index orchestration_events_kind_idx on orchestration_events(session_id, kind, id desc);
+    `),
+  },
+  {
+    version: 20, name: "workspace-approval-reservations-and-config-journal",
+    up: sqlite => sqlite.exec(`
+      alter table workspace_access_requests add column revision integer not null default 1;
+      alter table workspace_access_requests add column decision_operation_id text;
+      alter table workspace_access_grants add column activation_state text not null default 'active';
+      alter table workspace_access_grants add column operation_id text;
+      alter table workspace_access_grants add column use_generation integer not null default 0;
+      create unique index workspace_access_grant_operation on workspace_access_grants(operation_id)
+        where operation_id is not null;
+      create table workspace_access_operations (
+        id text primary key,
+        kind text not null check(kind in ('approval', 'revocation')),
+        request_id text,
+        path text not null,
+        decision text not null,
+        grant_id text,
+        request_revision integer,
+        phase text not null,
+        revision integer not null default 1,
+        created_at text not null,
+        updated_at text not null,
+        detail_code text
+      );
+      create index workspace_access_operations_request on workspace_access_operations(request_id);
+      create table workspace_access_managed_roots (
+        path_key text primary key,
+        path text not null,
+        active_grant_id text,
+        operation_id text,
+        generation integer not null default 1
+      );
+      create table workspace_access_config_serialization (
+        singleton integer primary key check(singleton = 1),
+        operation_id text
+      );
+      insert into workspace_access_config_serialization(singleton, operation_id) values (1, null);
+    `),
+  },
+  {
+    version: 21, name: "trusted-validation-evidence",
+    up: sqlite => sqlite.exec(`
+      alter table orchestration_sessions add column last_test_attempt_at text;
+      alter table orchestration_sessions add column last_successful_validation_at text;
+      alter table orchestration_sessions add column last_validation_failure_at text;
+      alter table orchestration_sessions add column last_validated_commit text;
+      alter table orchestration_sessions add column last_validated_tree text;
+      alter table orchestration_sessions add column last_validated_file_generation integer;
+      create table orchestration_test_runs (
+        id text primary key,
+        project_key text not null,
+        session_id text not null references orchestration_sessions(id) on delete cascade,
+        process_session_id text,
+        revision integer not null default 1,
+        status text not null check(status in ('started','running','passed','failed','cancelled','unknown')),
+        data_json text not null,
+        started_at text not null,
+        completed_at text
+      );
+      create unique index orchestration_test_runs_process on orchestration_test_runs(process_session_id)
+        where process_session_id is not null;
+      create index orchestration_test_runs_session on orchestration_test_runs(session_id, started_at desc, id);
+      create table orchestration_execution_evidence (
+        id text primary key,
+        project_key text not null,
+        session_id text not null references orchestration_sessions(id) on delete cascade,
+        test_run_id text not null unique references orchestration_test_runs(id) on delete cascade,
+        data_json text not null,
+        created_at text not null
+      );
+      create index orchestration_execution_evidence_scope
+        on orchestration_execution_evidence(project_key, session_id, created_at desc);
+    `),
+  },
+  {
+    version: 22, name: "logical-session-and-execution-attempt-fencing",
+    up: sqlite => sqlite.exec(`
+      alter table orchestration_sessions add column logical_session_id text;
+      alter table orchestration_sessions add column worker_incarnation_id text;
+      update orchestration_sessions
+        set logical_session_id = 'logical_' || id,
+            worker_incarnation_id = 'worker_' || id || '_' || incarnation
+        where logical_session_id is null or worker_incarnation_id is null;
+      create unique index orchestration_sessions_logical on orchestration_sessions(logical_session_id);
+
+      alter table coordinator_tasks add column attempt_id text;
+      alter table coordinator_tasks add column lease_generation integer not null default 0;
+      alter table coordinator_tasks add column owner_worker_incarnation_id text;
+      update coordinator_tasks
+        set attempt_id = 'legacy_attempt_' || id || '_' || revision,
+            owner_worker_incarnation_id = (
+              select worker_incarnation_id from orchestration_sessions s where s.id = coordinator_tasks.owner_session_id
+            ),
+            lease_generation = 1
+        where state = 'claimed' and attempt_id is null;
+      create unique index coordinator_tasks_attempt on coordinator_tasks(attempt_id) where attempt_id is not null;
+    `),
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {

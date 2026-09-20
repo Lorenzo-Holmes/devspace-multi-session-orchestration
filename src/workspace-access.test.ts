@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -157,12 +157,14 @@ interface TestFixture {
 }
 
 async function fixture(t: TestContext): Promise<TestFixture> {
-  const root = await mkdtemp(join(tmpdir(), "devspace-access-test-"));
-  const allowed = join(root, "allowed");
-  const project = join(root, "requested-project");
+  const root = await realpath(await mkdtemp(join(tmpdir(), "devspace-access-test-")));
+  const allowedPath = join(root, "allowed");
+  const projectPath = join(root, "requested-project");
   const stateDir = join(root, "state");
-  await mkdir(allowed, { recursive: true });
-  await mkdir(project, { recursive: true });
+  await mkdir(allowedPath, { recursive: true });
+  await mkdir(projectPath, { recursive: true });
+  const allowed = await realpath(allowedPath);
+  const project = await realpath(projectPath);
   const config = loadConfig(writeTestDevspaceConfig(join(root, "config"), {
     workspaces: {
       allowedRoots: [allowed],

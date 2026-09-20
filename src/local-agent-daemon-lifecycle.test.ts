@@ -15,6 +15,10 @@ import {
 const root = await mkdtemp(join(tmpdir(), "devspace-agentd-lifecycle-test-"));
 try {
   const paths = localAgentDaemonPaths(join(root, "state"));
+  if (process.platform !== "win32") {
+    assert.ok(paths.endpoint.length < 100, `Unix daemon endpoint must remain compact: ${paths.endpoint}`);
+    assert.ok(paths.endpoint.startsWith("/tmp/devspace-agentd-"));
+  }
   ensureLocalAgentDaemonStateDir(paths.stateDir);
   const lock = new LocalAgentDaemonLock(paths);
   lock.acquire();

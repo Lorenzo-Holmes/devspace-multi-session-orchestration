@@ -48,13 +48,13 @@ export function registerOrchestrationV2Tools(server: McpServer, v2: Orchestratio
   register("worktree_cleanup_status", "Record cleanup eligibility for a terminal task. No files or worktrees are deleted.",
     { taskId: id, expectedRevision: revision }, false, (p, a) => v2.bindings.cleanup(p, a.taskId, a.expectedRevision));
   register("integration_create", "Create durable review metadata for a task worktree. Never merges, rebases, cherry-picks or pushes.",
-    { taskId: id, sessionId: id, candidateRef: integrationUpdateSchema.shape.candidateRef }, false,
-    (p, a) => v2.integrations.create(p, a.taskId, a.sessionId, a.candidateRef));
+    { taskId: id, sessionId: id, candidateRef: integrationUpdateSchema.shape.candidateRef, targetRef: integrationUpdateSchema.shape.targetRef }, false,
+    (p, a) => v2.integrations.create(p, a.taskId, a.sessionId, a.candidateRef, a.targetRef));
   register("integration_status", "Read the last integration gate snapshot; checkedAt identifies its freshness.", { integrationId: id }, true,
     (p, a) => v2.integrations.get(p, a.integrationId));
   register("integration_list", "List project integration records with bounded cursor pagination.", page, true,
     (p, a) => v2.integrations.list(p, a.limit, a.after));
-  register("integration_update", "CAS update of explicit review/evidence metadata. Test evidence references durable test_run events and the tested commit. Invalidates previous gates.",
+  register("integration_update", "CAS update of explicit review/evidence metadata. Evidence IDs must refer to execution-issued validation evidence in the bound session; callers cannot pair arbitrary events with commits. Invalidates previous gates.",
     { integrationId: id, expectedRevision: revision, ...integrationUpdateSchema.shape }, false,
     (p, a) => v2.integrations.update(p, a.integrationId, a.expectedRevision, a));
   register("integration_gate", "Read actual Git state and evaluate gates; persist the review snapshot only. No project writes or Git integration operations.",

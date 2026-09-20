@@ -59,6 +59,10 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 16, name: "handoff-checkpoints-v2" },
       { version: 17, name: "project-memory-v2" },
       { version: 18, name: "automation-due-work-v2" },
+      { version: 19, name: "session-cas-and-mutation-generation" },
+      { version: 20, name: "workspace-approval-reservations-and-config-journal" },
+      { version: 21, name: "trusted-validation-evidence" },
+      { version: 22, name: "logical-session-and-execution-attempt-fencing" },
     ]);
   } finally {
     database.close();

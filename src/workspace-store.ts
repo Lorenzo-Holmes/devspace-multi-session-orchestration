@@ -46,6 +46,7 @@ export interface WorkspaceStore {
     accessGrantId?: string;
   }): WorkspaceSession;
   getSession(id: string): WorkspaceSession | undefined;
+  findActiveSessionByRoot(root: string, mode: WorkspaceMode): WorkspaceSession | undefined;
   touchSession(id: string): void;
   getConversationBinding(
     conversationScopeId: string,
@@ -123,6 +124,13 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
       .where(eq(workspaceSessions.id, id))
       .get();
 
+    return row ? rowToWorkspaceSession(row) : undefined;
+  }
+
+  findActiveSessionByRoot(root: string, mode: WorkspaceMode): WorkspaceSession | undefined {
+    const row = this.database.db.select().from(workspaceSessions)
+      .where(and(eq(workspaceSessions.root, root), eq(workspaceSessions.mode, mode), eq(workspaceSessions.status, "active")))
+      .get();
     return row ? rowToWorkspaceSession(row) : undefined;
   }
 

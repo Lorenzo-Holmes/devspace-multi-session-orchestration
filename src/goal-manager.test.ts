@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {Result} from 'better-result';
-import {mkdtemp,mkdir,rm,writeFile} from 'node:fs/promises';
+import {mkdtemp,mkdir,realpath,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {GoalManager} from './goal-manager.js';
@@ -11,8 +11,9 @@ import type {CodexGoalSession,NativeGoal} from './local-agent-codex.js';
 import type {GoalShrimpClient} from './goal-shrimp-client.js';
 
 test('concurrent starts have one writer; pause fences startup and late tool callbacks',async()=>{
-  const root=await mkdtemp(join(tmpdir(),'goal-lifecycle-')),project=join(root,'project'),dataRoot=join(root,'data');
-  await mkdir(project);await mkdir(dataRoot);
+  const root=await realpath(await mkdtemp(join(tmpdir(),'goal-lifecycle-'))),projectPath=join(root,'project'),dataRootPath=join(root,'data');
+  await mkdir(projectPath);await mkdir(dataRootPath);
+  const project=await realpath(projectPath),dataRoot=await realpath(dataRootPath);
   let releaseOpen!:()=>void;const openGate=new Promise<void>(r=>{releaseOpen=r;});
   let sessions=0,shrimpConnects=0,writes=0,activeCalls=0,closed=false,session:CodexGoalSession|undefined;
   let native:NativeGoal={threadId:'test-native-thread',objective:'Create a document',status:'paused',tokenBudget:null,tokensUsed:0,timeUsedSeconds:0};

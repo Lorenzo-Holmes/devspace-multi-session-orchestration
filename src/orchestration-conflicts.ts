@@ -21,9 +21,11 @@ export function detectOrchestrationConflicts(
   intents: readonly OrchestrationFileIntent[],
   limit = 200,
 ): OrchestrationConflict[] {
-  const boundedLimit = Math.max(1, Math.min(limit, 500));
+  if (limit !== Number.POSITIVE_INFINITY && (!Number.isSafeInteger(limit) || limit < 1)) throw new Error("Invalid conflict output limit.");
+  const boundedLimit = limit === Number.POSITIVE_INFINITY ? limit : Math.min(limit, 500);
+  const intentOwners = new Set(intents.map(intent => intent.sessionId));
   const active = sessions
-    .filter((session) => !terminalStates.has(session.state))
+    .filter((session) => !terminalStates.has(session.state) && intentOwners.has(session.id))
     .slice()
     .sort((a, b) => a.id.localeCompare(b.id));
   const bySession = new Map<string, OrchestrationFileIntent[]>();

@@ -47,6 +47,9 @@ assert.equal(foreground.running, false);
 assert.equal(foreground.exitCode, 0);
 assert.match(foreground.output, /foreground/);
 assert.equal(foreground.sessionId, undefined);
+assert.match(foreground.processSessionId, /^[0-9a-f-]+:\d+$/);
+assert.equal(foreground.cancelled, false);
+assert.equal(foreground.timedOut, false);
 
 const environment = await manager.start({
   workspaceId: "workspace-a",
@@ -67,6 +70,7 @@ const background = await manager.start({
 assert.equal(background.running, true);
 assert.ok(background.sessionId);
 assert.equal(typeof background.sessionId, "number");
+const backgroundProcessId = background.processSessionId;
 
 await assert.rejects(
   manager.write({
@@ -85,6 +89,7 @@ const completed = await manager.write({
 assert.equal(completed.running, false);
 assert.equal(completed.exitCode, 0);
 assert.match(completed.output, /finished/);
+assert.equal(completed.processSessionId, backgroundProcessId);
 
 const interactive = await manager.start({
   workspaceId: "workspace-a",
@@ -158,7 +163,19 @@ const interrupted = await manager.write({
   yieldTimeMs: 2_000,
 });
 assert.equal(interrupted.running, false);
+assert.equal(interrupted.cancelled, true);
 if (process.platform !== "win32") assert.equal(interrupted.signal, "SIGINT");
+
+const timedOut = await manager.start({
+  workspaceId: "workspace-a",
+  cwd: process.cwd(),
+  command: `${node} -e "setInterval(() => {}, 1000)"`,
+  timeoutMs: 50,
+  yieldTimeMs: 2_000,
+});
+assert.equal(timedOut.running, false);
+assert.equal(timedOut.timedOut, true);
+assert.notEqual(timedOut.exitCode, 0);
 
 let buffered = await manager.start({
   workspaceId: "workspace-a",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,9 +18,11 @@ const auth={token:"test-only",clientId:"client-one",scopes:["devspace"],extra:{d
 const identity=chatCardIdentity(auth);
 const body=(r:any)=>{assert.notEqual(r.isError,true,JSON.stringify(r));assert.equal(r.structuredContent.ok,true);return r.structuredContent.data;};
 async function fixture(waitMs=1500){
-  const root=await mkdtemp(join(process.env.DEVSPACE_CHAT_TEST_ROOT??tmpdir(),"goal-card-")),project=join(root,"project"),state=join(root,"state");
-  const dataRoot=await mkdtemp(join(process.env.DEVSPACE_CHAT_TEST_DATA_ROOT??root,"card-")),dataDir=join(dataRoot,"seed");
-  await mkdir(project);await mkdir(dataDir);
+  const root=await realpath(await mkdtemp(join(process.env.DEVSPACE_CHAT_TEST_ROOT??tmpdir(),"goal-card-")));
+  const projectPath=join(root,"project"),state=join(root,"state");
+  const dataRoot=await realpath(await mkdtemp(join(process.env.DEVSPACE_CHAT_TEST_DATA_ROOT??root,"card-"))),dataDir=join(dataRoot,"seed");
+  await mkdir(projectPath);await mkdir(dataDir);
+  const project=await realpath(projectPath);
   const now=Date.now(),taskId=randomUUID();let offset=0,allowed=true,authorizeHook:(()=>Promise<void>)|undefined;
   const config={enabled:true,shrimpEntryPoint:join(root,"unused.js"),dataRoot};
   let controller=new ChatGoalController({stateDir:state,config,now:()=>Date.now()+offset});

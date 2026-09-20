@@ -19,7 +19,7 @@ import { basename, dirname, join, parse, resolve } from "node:path";
 import type { ServerConfig } from "./config.js";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 import { AccessDeniedError, assertAllowedPath, isPathInsideRoot } from "./roots.js";
-import { setDevspaceConfigValue } from "./user-config.js";
+import { readDevspaceAllowedRoots, setDevspaceConfigValue } from "./user-config.js";
 import type { WorkspaceSession } from "./workspace-store.js";
 import type { Workspace, WorkspaceAccessMode } from "./workspaces.js";
 
@@ -48,6 +48,7 @@ export interface WorkspaceAccessAuthorization {
   scope: WorkspaceGrantScope;
   grantId?: string;
   consumedOnce?: boolean;
+  useGeneration?: number;
 }
 
 export interface WorkspaceAccessGrantView {
@@ -89,6 +90,8 @@ export interface WorkspaceAccessRevocationResult {
   revokedGrantCount: number;
   removedFromConfig: boolean;
   inheritedAccess?: WorkspaceAccessMode;
+  configurationPending?: boolean;
+  operationId?: string;
 }
 
 interface AccessRequestRow {
@@ -103,6 +106,8 @@ interface AccessRequestRow {
   created_at: string;
   expires_at: string;
   decided_at: string | null;
+  revision: number;
+  decision_operation_id: string | null;
 }
 
 interface AccessGrantRow {
@@ -116,6 +121,9 @@ interface AccessGrantRow {
   expires_at: string | null;
   created_at: string;
   revoked_at: string | null;
+  activation_state: string;
+  operation_id: string | null;
+  use_generation: number;
 }
 
 interface AccessAuditRow {
@@ -136,6 +144,31 @@ export interface WorkspaceAccessManagerOptions {
   requestTtlMs?: number;
   sessionTtlMs?: number;
   persistAllowedRoots?: (roots: string[]) => void | Promise<void>;
+  readAllowedRoots?: () => string[];
+  verifyFilesystemAccess?: (path: string, mode: WorkspaceAccessMode) => Promise<void>;
+}
+
+export interface WorkspaceAccessOperation {
+  id: string;
+  kind: "approval" | "revocation";
+  request_id: string | null;
+  path: string;
+  decision: string;
+  grant_id: string | null;
+  request_revision: number | null;
+  phase: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  detail_code: string | null;
+}
+
+interface ManagedRoot {
+  path_key: string;
+  path: string;
+  active_grant_id: string | null;
+  operation_id: string | null;
+  generation: number;
 }
 
 const DEFAULT_REQUEST_TTL_MS = 10 * 60 * 1_000;
@@ -147,6 +180,8 @@ export class WorkspaceAccessManager {
   private readonly requestTtlMs: number;
   private readonly sessionTtlMs: number;
   private readonly persistAllowedRoots: (roots: string[]) => void | Promise<void>;
+  private readonly readAllowedRoots: () => string[];
+  private readonly verifyFilesystemAccess: (path: string, mode: WorkspaceAccessMode) => Promise<void>;
 
   constructor(
     private readonly config: ServerConfig,
@@ -156,10 +191,13 @@ export class WorkspaceAccessManager {
     this.now = options.now ?? (() => new Date());
     this.requestTtlMs = options.requestTtlMs ?? DEFAULT_REQUEST_TTL_MS;
     this.sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+    this.verifyFilesystemAccess = options.verifyFilesystemAccess ?? verifyFilesystemAccess;
+    this.readAllowedRoots = options.readAllowedRoots ?? (options.persistAllowedRoots
+      ? () => [...this.config.allowedRoots]
+      : () => readDevspaceAllowedRoots({ ...process.env, DEVSPACE_CONFIG_DIR: this.config.configDir }));
     this.persistAllowedRoots = options.persistAllowedRoots ?? ((roots) => {
       const env = { ...process.env, DEVSPACE_CONFIG_DIR: this.config.configDir };
       setDevspaceConfigValue(["workspaces", "allowedRoots"], roots, env);
-      replaceAllowedRoots(this.config, roots);
     });
   }
 
@@ -208,7 +246,7 @@ export class WorkspaceAccessManager {
 
       this.database.sqlite.prepare(`
         update workspace_access_requests
-        set status = 'superseded', token_hash = '', decided_at = ?
+        set status = 'superseded', token_hash = '', decided_at = ?, revision = revision + 1
         where status = 'pending' and path = ?
           and coalesce(conversation_scope_id, '') = coalesce(?, '')
       `).run(createdAt, path, input.conversationScopeId ?? null);
@@ -272,122 +310,135 @@ export class WorkspaceAccessManager {
     conversationScopeId?: string;
     confirmHighRisk?: boolean;
   }): Promise<WorkspaceAccessApprovalResult> {
-    const request = this.requestRow(input.requestId);
-    this.assertPendingRequest(request, input.approvalToken, input.conversationScopeId);
-    const requestedAccess = accessMode(request.requested_access);
-    const now = this.now();
-    const decidedAt = now.toISOString();
+    if (!["deny", "once", "session", "permanent"].includes(input.decision)) throw new AccessDeniedError("Unknown access decision.");
+    if (input.decision === "deny") return this.database.sqlite.transaction(() => {
+      const request = this.requestRow(input.requestId);
+      this.assertPendingRequest(request, input.approvalToken, input.conversationScopeId);
+      const decidedAt = this.now().toISOString();
+      this.finishRequest(request, "denied", "deny", decidedAt);
+      if (request.decision_operation_id) this.cancelReservedEffects(request.decision_operation_id, "cancelled", "user_denied");
+      this.insertAudit({ event: "request_denied", requestId: request.id, path: request.path,
+        access: accessMode(request.requested_access), scope: "deny", createdAt: decidedAt,
+        conversationScopeId: request.conversation_scope_id ?? undefined });
+      return { status: "denied" as const, path: request.path, access: accessMode(request.requested_access),
+        decision: "deny" as const, message: "Access was denied. No pending decision can activate a grant." };
+    }).immediate();
 
-    if (input.decision === "deny") {
-      const transaction = this.database.sqlite.transaction(() => {
-        this.finishRequest(request.id, "denied", input.decision, decidedAt);
-        this.insertAudit({
-          event: "request_denied",
-          requestId: request.id,
-          path: request.path,
-          access: requestedAccess,
-          scope: input.decision,
-          conversationScopeId: request.conversation_scope_id ?? undefined,
-          createdAt: decidedAt,
-        });
-      });
-      transaction.immediate();
-      return {
-        status: "denied",
-        path: request.path,
-        access: requestedAccess,
-        decision: input.decision,
-        message: "Access was denied. No configuration or filesystem permission was changed.",
-      };
-    }
-
-    if (
-      (input.decision === "once" || input.decision === "session")
-      && !request.conversation_scope_id
-    ) {
-      throw new AccessDeniedError(
-        "This host did not provide a conversation identity. Choose permanent access or deny this request.",
-      );
-    }
-    if (accessRisk(request.path) === "high" && input.confirmHighRisk !== true) {
-      throw new AccessDeniedError(
-        "This is a high-risk system or drive-level path. Confirm the high-risk warning in the approval card first.",
-      );
-    }
-
-    await verifyFilesystemAccess(request.path, requestedAccess);
-
-    const grantId = `grant_${randomUUID()}`;
-    const expiresAt = input.decision === "session"
-      ? new Date(now.getTime() + this.sessionTtlMs).toISOString()
-      : undefined;
-    const usesRemaining = input.decision === "once" ? 1 : undefined;
-
-    this.database.sqlite.prepare(`
-      insert into workspace_access_grants (
-        id, path, access, scope, conversation_scope_id, request_id,
-        uses_remaining, expires_at, created_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      grantId,
-      request.path,
-      requestedAccess,
-      input.decision,
-      request.conversation_scope_id,
-      request.id,
-      usesRemaining ?? null,
-      expiresAt ?? null,
-      decidedAt,
-    );
+    const decision = input.decision;
+    const operation = this.database.sqlite.transaction(() => {
+      const request = this.requestRow(input.requestId);
+      this.assertPendingRequest(request, input.approvalToken, input.conversationScopeId);
+      if (request.decision_operation_id) throw new AccessDeniedError("This access request already has a reserved decision.");
+      if ((decision === "once" || decision === "session") && !request.conversation_scope_id) {
+        throw new AccessDeniedError("This host did not provide a conversation identity. Choose permanent access or deny this request.");
+      }
+      if (accessRisk(request.path) === "high" && input.confirmHighRisk !== true) {
+        throw new AccessDeniedError("This is a high-risk system or drive-level path. Confirm the high-risk warning in the approval card first.");
+      }
+      const id = `access_op_${randomUUID()}`, grantId = `grant_${randomUUID()}`, timestamp = this.now().toISOString();
+      const reserved = this.database.sqlite.prepare(`update workspace_access_requests
+        set decision_operation_id = ?, revision = revision + 1
+        where id = ? and revision = ? and status = 'pending' and decision_operation_id is null
+          and julianday(expires_at) > julianday(?)`)
+        .run(id, request.id, request.revision, timestamp);
+      if (reserved.changes !== 1) throw new AccessDeniedError("Access decision reservation conflict or expiry.");
+      this.database.sqlite.prepare(`insert into workspace_access_operations
+        (id, kind, request_id, path, decision, grant_id, request_revision, phase, created_at, updated_at)
+        values (?, 'approval', ?, ?, ?, ?, ?, 'reserved', ?, ?)`)
+        .run(id, request.id, request.path, decision, grantId, request.revision + 1, timestamp, timestamp);
+      this.insertAudit({ event: "decision_reserved", requestId: request.id, grantId,
+        path: request.path, access: accessMode(request.requested_access), scope: decision, createdAt: timestamp });
+      return this.operationRow(id);
+    }).immediate();
 
     try {
-      if (input.decision === "permanent") {
-        const roots = appendUniquePath(this.config.allowedRoots, request.path);
+      const request = this.assertReservedRequest(operation);
+      const requestedAccess = accessMode(request.requested_access);
+      await this.verifyFilesystemAccess(request.path, requestedAccess);
+      let rootGeneration: number | undefined;
+      let persistedRoots: string[] | undefined;
+      if (decision === "permanent") {
+        rootGeneration = this.database.sqlite.transaction(() => {
+          const fresh = this.assertReservedRequest(operation);
+          this.acquireConfigurationWriter(operation.id);
+          const existing = this.managedRoot(fresh.path);
+          const legacy = existing ? undefined : (this.database.sqlite.prepare(
+            "select * from workspace_access_grants where scope = 'permanent' and revoked_at is null and activation_state = 'active' order by created_at desc",
+          ).all() as AccessGrantRow[]).find(grant => pathKey(grant.path) === pathKey(fresh.path));
+          if (!existing) this.database.sqlite.prepare(`insert into workspace_access_managed_roots
+            (path_key, path, active_grant_id, operation_id, generation) values (?, ?, ?, ?, 1)`)
+            .run(pathKey(fresh.path), fresh.path, legacy?.id ?? null, operation.id);
+          else {
+            const result = this.database.sqlite.prepare(`update workspace_access_managed_roots
+              set operation_id = ?, generation = generation + 1 where path_key = ? and generation = ? and operation_id is null`)
+              .run(operation.id, pathKey(fresh.path), existing.generation);
+            if (result.changes !== 1) throw new AccessDeniedError("Another operation already reserved this permanent root.");
+          }
+          this.insertReservedGrant(operation, fresh, "prepared");
+          this.advanceOperation(operation.id, "config_writing");
+          return this.managedRoot(fresh.path)!.generation;
+        }).immediate();
+        // The reservation and inactive grant are durable before this external effect.
+        // Managed-root entries never become unscoped configured Modify grants.
+        const roots = appendUniquePath(this.readAllowedRoots(), request.path);
         await this.persistAllowedRoots(roots);
-        replaceAllowedRoots(this.config, roots);
+        persistedRoots = roots;
       }
+
+      const approved = this.database.sqlite.transaction(() => {
+        const fresh = this.assertReservedRequest(operation);
+        const decidedAt = this.now().toISOString();
+        let expiresAt: string | undefined;
+        if (decision === "permanent") {
+          this.assertConfigurationWriter(operation.id);
+          if (!this.readAllowedRoots().some(root => isPathInsideRoot(fresh.path, root))) {
+            throw new AccessDeniedError("Permanent root configuration is not present after persistence.");
+          }
+          const previous = this.managedRoot(fresh.path);
+          const rootUpdate = this.database.sqlite.prepare(`update workspace_access_managed_roots
+            set active_grant_id = ?, operation_id = null, generation = generation + 1
+            where path_key = ? and generation = ? and operation_id = ?`)
+            .run(operation.grant_id, pathKey(fresh.path), rootGeneration, operation.id);
+          if (rootUpdate.changes !== 1) throw new AccessDeniedError("Permanent root reservation became stale.");
+          const activated = this.database.sqlite.prepare(`update workspace_access_grants set activation_state = 'active'
+            where id = ? and operation_id = ? and activation_state = 'prepared' and revoked_at is null`)
+            .run(operation.grant_id, operation.id);
+          if (activated.changes !== 1) throw new AccessDeniedError("Prepared grant cannot be activated.");
+          if (previous?.active_grant_id) this.database.sqlite.prepare("update workspace_access_grants set revoked_at = ? where id = ?")
+            .run(decidedAt, previous.active_grant_id);
+        } else {
+          expiresAt = this.insertReservedGrant(operation, fresh, "active");
+        }
+        this.finishRequest(fresh, "approved", decision, decidedAt);
+        this.advanceOperation(operation.id, "committed");
+        this.releaseConfigurationWriter(operation.id);
+        this.insertAudit({ event: "grant_approved", requestId: fresh.id, grantId: operation.grant_id!,
+          path: fresh.path, access: requestedAccess, scope: decision,
+          conversationScopeId: fresh.conversation_scope_id ?? undefined, createdAt: decidedAt });
+        return { status: "approved" as const, path: fresh.path, access: requestedAccess, decision,
+          grantId: operation.grant_id!, expiresAt, message: approvalMessage(decision, expiresAt) };
+      }).immediate();
+      if (persistedRoots) replaceAllowedRoots(this.config, persistedRoots);
+      return approved;
     } catch (error) {
-      this.database.sqlite.prepare(`
-        update workspace_access_grants set revoked_at = ? where id = ?
-      `).run(decidedAt, grantId);
-      this.insertAudit({
-        event: "grant_failed",
-        requestId: request.id,
-        grantId,
-        path: request.path,
-        access: requestedAccess,
-        scope: input.decision,
-        conversationScopeId: request.conversation_scope_id ?? undefined,
-        detail: error instanceof Error ? error.message : String(error),
-        createdAt: decidedAt,
-      });
-      throw error;
+      this.database.sqlite.transaction(() => {
+        const current = this.operationRow(operation.id);
+        if (current.phase === "committed") return;
+        const uncertain = ["config_writing", "recovery_uncertain"].includes(current.phase);
+        this.database.sqlite.prepare(`update workspace_access_requests
+          set status = 'failed', token_hash = '', revision = revision + 1, decided_at = ?
+          where id = ? and decision_operation_id = ? and status = 'pending'`)
+          .run(this.now().toISOString(), operation.request_id, operation.id);
+        this.cancelReservedEffects(operation.id, uncertain ? "recovery_uncertain" : current.phase === "cancelled" ? "cancelled" : "failed",
+          uncertain ? "configuration_effect_may_have_applied" : "decision_not_committed");
+        this.releaseConfigurationWriter(operation.id);
+        this.insertAudit({ event: "grant_failed", requestId: operation.request_id ?? undefined,
+          grantId: operation.grant_id ?? undefined, path: operation.path, scope: decision,
+          detail: uncertain ? "configuration_effect_may_have_applied" : "decision_not_committed", createdAt: this.now().toISOString() });
+      }).immediate();
+      if (error instanceof AccessDeniedError) throw error;
+      throw new AccessDeniedError(`Workspace approval was not committed. Inspect recovery operation ${operation.id}.`);
     }
-
-    const transaction = this.database.sqlite.transaction(() => {
-      this.finishRequest(request.id, "approved", input.decision, decidedAt);
-      this.insertAudit({
-        event: "grant_approved",
-        requestId: request.id,
-        grantId,
-        path: request.path,
-        access: requestedAccess,
-        scope: input.decision,
-        conversationScopeId: request.conversation_scope_id ?? undefined,
-        createdAt: decidedAt,
-      });
-    });
-    transaction.immediate();
-
-    return {
-      status: "approved",
-      path: request.path,
-      access: requestedAccess,
-      decision: input.decision,
-      grantId,
-      expiresAt,
-      message: approvalMessage(input.decision, expiresAt),
-    };
   }
 
   async authorizeWorkspacePath(
@@ -426,12 +477,13 @@ export class WorkspaceAccessManager {
 
       if (grant.scope !== "once" || !grant.grantId) return { ...grant, path };
 
-      const reserved = this.database.sqlite.prepare(`
-        update workspace_access_grants
-        set uses_remaining = 0
-        where id = ? and revoked_at is null and uses_remaining = 1
-      `).run(grant.grantId);
-      if (reserved.changes === 1) {
+      const reserved = this.database.sqlite.transaction(() => {
+        const row = this.database.sqlite.prepare(`update workspace_access_grants
+          set uses_remaining = 0, use_generation = use_generation + 1
+          where id = ? and revoked_at is null and activation_state = 'active' and uses_remaining = 1
+            and use_generation = ? and (expires_at is null or julianday(expires_at) > julianday(?))
+          returning use_generation`).get(grant.grantId, grant.useGeneration, this.now().toISOString()) as { use_generation: number } | undefined;
+        if (!row) return undefined;
         this.insertAudit({
           event: "grant_consumed",
           grantId: grant.grantId,
@@ -441,18 +493,22 @@ export class WorkspaceAccessManager {
           conversationScopeId,
           createdAt: this.now().toISOString(),
         });
-        return { ...grant, path, consumedOnce: true };
-      }
+        return { ...grant, path, consumedOnce: true, useGeneration: row.use_generation };
+      }).immediate();
+      if (reserved) return reserved;
     }
   }
 
   releaseOnceAuthorization(authorization: WorkspaceAccessAuthorization): void {
-    if (!authorization.consumedOnce || !authorization.grantId) return;
-    this.database.sqlite.prepare(`
+    if (!authorization.consumedOnce || !authorization.grantId || authorization.useGeneration === undefined) return;
+    this.database.sqlite.transaction(() => {
+    const restored = this.database.sqlite.prepare(`
       update workspace_access_grants
-      set uses_remaining = 1
-      where id = ? and revoked_at is null and uses_remaining = 0
-    `).run(authorization.grantId);
+      set uses_remaining = 1, use_generation = use_generation + 1
+      where id = ? and revoked_at is null and activation_state = 'active' and uses_remaining = 0
+        and use_generation = ? and (expires_at is null or julianday(expires_at) > julianday(?))
+    `).run(authorization.grantId, authorization.useGeneration, this.now().toISOString());
+    if (restored.changes !== 1) return;
     this.insertAudit({
       event: "grant_restored_after_open_failure",
       grantId: authorization.grantId,
@@ -461,6 +517,7 @@ export class WorkspaceAccessManager {
       scope: authorization.scope,
       createdAt: this.now().toISOString(),
     });
+    }).immediate();
   }
 
   workspaceRestoreAllowedRoots(
@@ -469,12 +526,12 @@ export class WorkspaceAccessManager {
       "root" | "mode" | "sourceRoot" | "accessMode" | "accessGrantId"
     >,
   ): string[] {
-    if (!session.accessGrantId) return this.config.allowedRoots;
+    if (!session.accessGrantId) return this.unmanagedConfiguredRoots();
 
     const row = this.database.sqlite.prepare(`
       select * from workspace_access_grants where id = ?
     `).get(session.accessGrantId) as AccessGrantRow | undefined;
-    if (!row || row.revoked_at || isExpired(row.expires_at, this.now().getTime())) {
+    if (!row || !isGrantActive(row, this.now().getTime(), false) || !this.permanentGrantIsCurrent(row)) {
       throw new AccessDeniedError(
         `Workspace access is no longer active: ${session.root}. Request access again.`,
       );
@@ -493,14 +550,14 @@ export class WorkspaceAccessManager {
     }
     if (
       row.scope === "permanent"
-      && !this.config.allowedRoots.some((root) => isPathInsideRoot(authorizedPath, root))
+      && !this.readAllowedRoots().some((root) => isPathInsideRoot(authorizedPath, root))
     ) {
       throw new AccessDeniedError(
         `Workspace access was removed from configuration: ${session.root}. Request access again.`,
       );
     }
 
-    return appendUniquePath(this.config.allowedRoots, row.path);
+    return appendUniquePath(this.unmanagedConfiguredRoots(), row.path);
   }
 
   assertWorkspaceReadable(workspace: Pick<Workspace, "root" | "accessMode" | "accessGrantId"> & Partial<Pick<Workspace, "mode" | "sourceRoot" | "worktree">>): void {
@@ -528,13 +585,15 @@ export class WorkspaceAccessManager {
         }
         return true;
       })
-      .map((row) => grantView(row, now));
+      .map((row) => ({ ...grantView(row, now), active: grantView(row, now).active
+        && this.permanentGrantIsCurrent(row)
+        && (row.scope !== "permanent" || this.readAllowedRoots().some(root => isPathInsideRoot(row.path, root))) }));
     const approvedByPath = new Map(
       approvals
         .filter((grant) => grant.scope === "permanent" && grant.active)
         .map((grant) => [pathKey(grant.path), grant]),
     );
-    const configured = this.config.allowedRoots.map((path) => {
+    const configured = this.unmanagedConfiguredRoots().map((path) => {
       const approved = approvedByPath.get(pathKey(path));
       return approved ?? {
         id: `config_${createHash("sha256").update(pathKey(path)).digest("hex").slice(0, 16)}`,
@@ -576,42 +635,205 @@ export class WorkspaceAccessManager {
   async revokePath(inputPath: string): Promise<WorkspaceAccessRevocationResult> {
     const path = await canonicalPathForRevocation(inputPath);
     const now = this.now().toISOString();
-    const roots = this.config.allowedRoots.filter((root) => pathKey(root) !== pathKey(path));
-    const removedFromConfig = roots.length !== this.config.allowedRoots.length;
-
-    if (removedFromConfig) {
-      await this.persistAllowedRoots(roots);
-      replaceAllowedRoots(this.config, roots);
-    }
-
-    const result = this.database.sqlite.prepare(`
-      update workspace_access_grants
-      set revoked_at = ?
-      where revoked_at is null and path = ?
-    `).run(now, path);
-    this.database.sqlite.prepare(`
-      update workspace_access_requests
-      set status = 'revoked', token_hash = '', decided_at = coalesce(decided_at, ?)
-      where path = ? and status = 'pending'
-    `).run(now, path);
-    this.insertAudit({
-      event: "grant_revoked",
-      path,
-      detail: `revokedGrantCount=${result.changes}; removedFromConfig=${removedFromConfig}`,
-      createdAt: now,
-    });
-
+    const previousRoots = this.readAllowedRoots();
+    const configured = previousRoots.some(root => pathKey(root) === pathKey(path));
+    const operationId = `access_op_${randomUUID()}`;
+    const result = this.database.sqlite.transaction(() => {
+      const rootsManaged = Boolean(this.managedRoot(path));
+      if (configured || rootsManaged) this.database.sqlite.prepare(`insert into workspace_access_managed_roots
+        (path_key, path, active_grant_id, operation_id, generation) values (?, ?, null, null, 1)
+        on conflict(path_key) do update set active_grant_id = null, operation_id = null, generation = generation + 1`)
+        .run(pathKey(path), path);
+      const grants = (this.database.sqlite.prepare("select * from workspace_access_grants where revoked_at is null").all() as AccessGrantRow[])
+        .filter(grant => pathKey(grant.path) === pathKey(path));
+      for (const grant of grants) this.database.sqlite.prepare("update workspace_access_grants set revoked_at = ? where id = ?").run(now, grant.id);
+      const requests = (this.database.sqlite.prepare("select * from workspace_access_requests where status = 'pending'").all() as AccessRequestRow[])
+        .filter(request => pathKey(request.path) === pathKey(path));
+      for (const request of requests) {
+        this.database.sqlite.prepare(`update workspace_access_requests set status = 'revoked', token_hash = '',
+          decided_at = ?, revision = revision + 1 where id = ? and revision = ?`).run(now, request.id, request.revision);
+        if (request.decision_operation_id) this.cancelReservedEffects(request.decision_operation_id, "cancelled", "user_revoked");
+      }
+      const needsConfiguration = configured || rootsManaged;
+      this.database.sqlite.prepare(`insert into workspace_access_operations
+        (id, kind, path, decision, phase, created_at, updated_at) values (?, 'revocation', ?, 'revoke', ?, ?, ?)`)
+        .run(operationId, path, needsConfiguration ? "config_pending" : "committed", now, now);
+      this.insertAudit({ event: "grant_revoked", path,
+        detail: `revokedGrantCount=${grants.length}; configurationPending=${needsConfiguration}`, createdAt: now });
+      return { revokedGrantCount: grants.length, needsConfiguration };
+    }).immediate();
+    // Revoke authority before any asynchronous configuration write. An in-flight
+    // approval cannot turn a stale configured root into an unscoped grant.
+    replaceAllowedRoots(this.config, previousRoots.filter(root => pathKey(root) !== pathKey(path)));
+    const persisted = result.needsConfiguration ? await this.persistRevocation(operationId) : true;
     const inherited = this.findBestGrant(path, undefined, false);
     return {
       path,
-      revokedGrantCount: result.changes,
-      removedFromConfig,
+      revokedGrantCount: result.revokedGrantCount,
+      removedFromConfig: configured && persisted,
       inheritedAccess: inherited?.access,
+      configurationPending: !persisted,
+      operationId,
     };
   }
 
   close(): void {
     this.database.close();
+  }
+
+  /** Administrative read surface. Approval tokens and configuration contents are never returned. */
+  listOperations(limit = 100, after = ""): WorkspaceAccessOperation[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("Invalid access-operation page size.");
+    return this.database.sqlite.prepare("select * from workspace_access_operations where id > ? order by id limit ?")
+      .all(after, limit) as WorkspaceAccessOperation[];
+  }
+
+  /** Conservative recovery cancels intent; it never resumes an old approval or grants authority. */
+  cancelOperationForRecovery(id: string, expectedRevision: number): WorkspaceAccessOperation {
+    return this.database.sqlite.transaction(() => {
+      const operation = this.operationRow(id);
+      if (operation.revision !== expectedRevision) throw new AccessDeniedError("Access recovery revision conflict.");
+      if (operation.phase === "committed") throw new AccessDeniedError("A committed access operation must use the ordinary revoke flow.");
+      this.database.sqlite.prepare(`update workspace_access_requests set status = 'cancelled', token_hash = '',
+        revision = revision + 1, decided_at = ? where decision_operation_id = ? and status = 'pending'`)
+        .run(this.now().toISOString(), operation.id);
+      this.cancelReservedEffects(id, operation.kind === "revocation" ? "recovery_uncertain" : "cancelled", "recovery_cancelled_no_grant");
+      this.releaseConfigurationWriter(id);
+      this.insertAudit({ event: "decision_recovery_cancelled", requestId: operation.request_id ?? undefined,
+        grantId: operation.grant_id ?? undefined, path: operation.path, createdAt: this.now().toISOString(),
+        detail: "No approval replayed. A late configuration writer remains non-authoritative." });
+      return this.operationRow(id);
+    }).immediate();
+  }
+
+  /** Explicit maintenance, not called by Doctor and not registered as an approval tool. */
+  async resumeRevocationCleanup(id: string, expectedRevision: number): Promise<boolean> {
+    const operation = this.operationRow(id);
+    if (operation.kind !== "revocation" || operation.revision !== expectedRevision) {
+      throw new AccessDeniedError("Revocation recovery revision or operation mismatch.");
+    }
+    return this.persistRevocation(id, expectedRevision);
+  }
+
+  private operationRow(id: string): WorkspaceAccessOperation {
+    const row = this.database.sqlite.prepare("select * from workspace_access_operations where id = ?")
+      .get(id) as WorkspaceAccessOperation | undefined;
+    if (!row) throw new AccessDeniedError("Unknown access operation.");
+    return row;
+  }
+
+  private assertReservedRequest(operation: WorkspaceAccessOperation): AccessRequestRow {
+    if (operation.kind !== "approval" || !operation.request_id) throw new AccessDeniedError("Not an approval reservation.");
+    const request = this.requestRow(operation.request_id), current = this.operationRow(operation.id);
+    if (request.status !== "pending" || request.decision_operation_id !== operation.id
+      || request.revision !== operation.request_revision || request.path !== operation.path
+      || !["reserved", "config_writing"].includes(current.phase)) {
+      throw new AccessDeniedError("This access request is no longer pending under its reserved revision.");
+    }
+    const expiry = Date.parse(request.expires_at);
+    if (!Number.isFinite(expiry) || expiry <= this.now().getTime()) throw new AccessDeniedError("This access request expired during verification.");
+    return request;
+  }
+
+  private insertReservedGrant(operation: WorkspaceAccessOperation, request: AccessRequestRow, activation: "prepared" | "active"): string | undefined {
+    const timestamp = this.now().toISOString();
+    const expiresAt = operation.decision === "session" ? new Date(this.now().getTime() + this.sessionTtlMs).toISOString() : undefined;
+    this.database.sqlite.prepare(`insert into workspace_access_grants
+      (id, path, access, scope, conversation_scope_id, request_id, uses_remaining, expires_at, created_at, activation_state, operation_id)
+      values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(operation.grant_id, request.path, request.requested_access, operation.decision, request.conversation_scope_id,
+        request.id, operation.decision === "once" ? 1 : null, expiresAt ?? null, timestamp, activation, operation.id);
+    return expiresAt;
+  }
+
+  private managedRoot(path: string): ManagedRoot | undefined {
+    return this.database.sqlite.prepare("select * from workspace_access_managed_roots where path_key = ?")
+      .get(pathKey(path)) as ManagedRoot | undefined;
+  }
+
+  private unmanagedConfiguredRoots(): string[] {
+    const managed = new Set((this.database.sqlite.prepare("select path_key from workspace_access_managed_roots").all() as { path_key: string }[])
+      .map(row => row.path_key));
+    return this.readAllowedRoots().filter(root => !managed.has(pathKey(root)));
+  }
+
+  private permanentGrantIsCurrent(grant: AccessGrantRow): boolean {
+    if (grant.scope !== "permanent") return true;
+    const managed = this.managedRoot(grant.path);
+    return !managed || managed.active_grant_id === grant.id;
+  }
+
+  private acquireConfigurationWriter(operationId: string): void {
+    const result = this.database.sqlite.prepare(`update workspace_access_config_serialization set operation_id = ?
+      where singleton = 1 and operation_id is null`).run(operationId);
+    if (result.changes !== 1) throw new AccessDeniedError("An access configuration operation is still in progress; inspect its recovery journal before retrying.");
+  }
+
+  private assertConfigurationWriter(operationId: string): void {
+    const row = this.database.sqlite.prepare("select operation_id from workspace_access_config_serialization where singleton = 1")
+      .get() as { operation_id: string | null };
+    if (row.operation_id !== operationId) throw new AccessDeniedError("Configuration writer reservation became stale.");
+  }
+
+  private releaseConfigurationWriter(operationId: string): void {
+    this.database.sqlite.prepare("update workspace_access_config_serialization set operation_id = null where singleton = 1 and operation_id = ?")
+      .run(operationId);
+  }
+
+  private advanceOperation(id: string, phase: string, detailCode?: string): void {
+    const current = this.operationRow(id);
+    const result = this.database.sqlite.prepare(`update workspace_access_operations
+      set phase = ?, detail_code = ?, updated_at = ?, revision = revision + 1 where id = ? and revision = ? and phase <> 'committed'`)
+      .run(phase, detailCode ?? null, this.now().toISOString(), id, current.revision);
+    if (result.changes !== 1) throw new AccessDeniedError("Access operation revision conflict.");
+  }
+
+  private cancelReservedEffects(id: string, phase: string, detailCode: string): void {
+    const operation = this.operationRow(id);
+    if (operation.phase === "committed") return;
+    const uncertain = ["config_writing", "recovery_uncertain"].includes(operation.phase);
+    this.database.sqlite.prepare(`update workspace_access_grants set revoked_at = coalesce(revoked_at, ?)
+      where operation_id = ? and activation_state = 'prepared'`).run(this.now().toISOString(), id);
+    this.database.sqlite.prepare(`update workspace_access_managed_roots set operation_id = null, generation = generation + 1
+      where operation_id = ?`).run(id);
+    this.advanceOperation(id, uncertain ? "recovery_uncertain" : phase,
+      uncertain ? "configuration_effect_may_have_applied" : detailCode);
+  }
+
+  private async persistRevocation(id: string, expectedRevision?: number): Promise<boolean> {
+    const operation = this.operationRow(id);
+    if (operation.kind !== "revocation") throw new AccessDeniedError("Only revocation cleanup can be resumed.");
+    if (operation.phase === "committed") return true;
+    try {
+      this.database.sqlite.transaction(() => {
+        const fresh = this.operationRow(id);
+        if ((expectedRevision !== undefined && fresh.revision !== expectedRevision)
+          || !["config_pending", "recovery_uncertain"].includes(fresh.phase)) throw new AccessDeniedError("Revocation cleanup revision conflict.");
+        this.acquireConfigurationWriter(id);
+        this.advanceOperation(id, "config_writing");
+      }).immediate();
+    } catch (error) {
+      if (error instanceof AccessDeniedError) return false;
+      throw error;
+    }
+    try {
+      const roots = this.readAllowedRoots().filter(root => pathKey(root) !== pathKey(operation.path));
+      await this.persistAllowedRoots(roots);
+      replaceAllowedRoots(this.config, roots);
+      this.database.sqlite.transaction(() => {
+        this.assertConfigurationWriter(id);
+        if (this.operationRow(id).phase !== "config_writing") throw new AccessDeniedError("Revocation cleanup became stale.");
+        this.advanceOperation(id, "committed");
+        this.releaseConfigurationWriter(id);
+      }).immediate();
+      return true;
+    } catch {
+      this.database.sqlite.transaction(() => {
+        if (this.operationRow(id).phase !== "committed") this.advanceOperation(id, "recovery_uncertain", "revocation_config_cleanup_failed");
+        this.releaseConfigurationWriter(id);
+      }).immediate();
+      return false;
+    }
   }
 
   private requestRow(id: string): AccessRequestRow {
@@ -630,10 +852,10 @@ export class WorkspaceAccessManager {
     if (request.status !== "pending") {
       throw new AccessDeniedError(`This access request is no longer pending (${request.status}).`);
     }
-    if (Date.parse(request.expires_at) <= this.now().getTime()) {
+    if (!Number.isFinite(Date.parse(request.expires_at)) || Date.parse(request.expires_at) <= this.now().getTime()) {
       this.database.sqlite.prepare(`
         update workspace_access_requests
-        set status = 'expired', token_hash = '', decided_at = ?
+        set status = 'expired', token_hash = '', decided_at = ?, revision = revision + 1
         where id = ? and status = 'pending'
       `).run(this.now().toISOString(), request.id);
       throw new AccessDeniedError("This access request expired. Ask DevSpace to create a new request.");
@@ -653,16 +875,17 @@ export class WorkspaceAccessManager {
   }
 
   private finishRequest(
-    requestId: string,
+    request: AccessRequestRow,
     status: string,
     decision: WorkspaceAccessDecision,
     decidedAt: string,
   ): void {
-    this.database.sqlite.prepare(`
+    const result = this.database.sqlite.prepare(`
       update workspace_access_requests
-      set status = ?, decision_scope = ?, token_hash = '', decided_at = ?
-      where id = ? and status = 'pending'
-    `).run(status, decision, decidedAt, requestId);
+      set status = ?, decision_scope = ?, token_hash = '', decided_at = ?, revision = revision + 1
+      where id = ? and status = 'pending' and revision = ? and decision_operation_id is ?
+    `).run(status, decision, decidedAt, request.id, request.revision, request.decision_operation_id);
+    if (result.changes !== 1) throw new AccessDeniedError("Access request transition conflicted with a newer decision.");
   }
 
   private findBestGrant(
@@ -673,7 +896,7 @@ export class WorkspaceAccessManager {
     const now = this.now().getTime();
     const candidates: Array<WorkspaceAccessAuthorization & { priority: number }> = [];
 
-    for (const root of this.config.allowedRoots) {
+    for (const root of this.unmanagedConfiguredRoots()) {
       if (!isPathInsideRoot(path, root)) continue;
       candidates.push({
         path,
@@ -691,6 +914,7 @@ export class WorkspaceAccessManager {
     `).all() as AccessGrantRow[];
     for (const row of rows) {
       if (!isGrantActive(row, now, requireUnusedOnce)) continue;
+      if (!this.permanentGrantIsCurrent(row)) continue;
       if (!isPathInsideRoot(path, row.path)) continue;
       if (
         (row.scope === "once" || row.scope === "session")
@@ -698,7 +922,7 @@ export class WorkspaceAccessManager {
       ) continue;
       if (
         row.scope === "permanent"
-        && !this.config.allowedRoots.some((root) => isPathInsideRoot(row.path, root))
+        && !this.readAllowedRoots().some((root) => isPathInsideRoot(row.path, root))
       ) continue;
       candidates.push({
         path,
@@ -706,6 +930,7 @@ export class WorkspaceAccessManager {
         access: accessMode(row.access),
         scope: grantScope(row.scope),
         grantId: row.id,
+        useGeneration: row.use_generation,
         priority: 1,
       });
     }
@@ -728,13 +953,13 @@ export class WorkspaceAccessManager {
     if (managed) assertAllowedPath(workspace.root, [this.config.worktreeRoot]);
     const authorizedPath = managed ? workspace.sourceRoot! : workspace.root;
     if (!workspace.accessGrantId) {
-      assertAllowedPath(authorizedPath, this.config.allowedRoots);
+      assertAllowedPath(authorizedPath, this.unmanagedConfiguredRoots());
       return;
     }
     const row = this.database.sqlite.prepare(`
       select * from workspace_access_grants where id = ?
     `).get(workspace.accessGrantId) as AccessGrantRow | undefined;
-    if (!row || row.revoked_at || isExpired(row.expires_at, this.now().getTime())) {
+    if (!row || !isGrantActive(row, this.now().getTime(), false) || !this.permanentGrantIsCurrent(row)) {
       throw new AccessDeniedError(
         `Workspace access is no longer active: ${workspace.root}. Request access again.`,
       );
@@ -744,7 +969,7 @@ export class WorkspaceAccessManager {
     }
     if (
       row.scope === "permanent"
-      && !this.config.allowedRoots.some((root) => isPathInsideRoot(authorizedPath, root))
+      && !this.readAllowedRoots().some((root) => isPathInsideRoot(authorizedPath, root))
     ) {
       throw new AccessDeniedError(
         `Workspace access was removed from configuration: ${workspace.root}. Request access again.`,
@@ -901,12 +1126,12 @@ function accessSatisfies(actual: WorkspaceAccessMode, requested: WorkspaceAccess
 }
 
 function isGrantActive(row: AccessGrantRow, now: number, requireUnusedOnce: boolean): boolean {
-  if (row.revoked_at || isExpired(row.expires_at, now)) return false;
+  if (row.activation_state !== "active" || row.revoked_at || isExpired(row.expires_at, now)) return false;
   return !requireUnusedOnce || row.scope !== "once" || row.uses_remaining === 1;
 }
 
 function isExpired(expiresAt: string | null, now: number): boolean {
-  return expiresAt !== null && Date.parse(expiresAt) <= now;
+  return expiresAt !== null && (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= now);
 }
 
 function grantView(row: AccessGrantRow, now: number): WorkspaceAccessGrantView {
@@ -918,8 +1143,7 @@ function grantView(row: AccessGrantRow, now: number): WorkspaceAccessGrantView {
     conversationScopeId: row.conversation_scope_id ?? undefined,
     expiresAt: row.expires_at ?? undefined,
     createdAt: row.created_at,
-    active: !row.revoked_at && !isExpired(row.expires_at, now)
-      && (row.scope !== "once" || row.uses_remaining === 1),
+    active: isGrantActive(row, now, true),
     source: "approval",
   };
 }

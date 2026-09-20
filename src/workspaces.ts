@@ -11,7 +11,8 @@ import { mkdir, opendir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
-import { createManagedWorktree } from "./git-worktrees.js";
+import { createManagedWorktree, materializeManagedWorktree as materializePreparedGitWorktree,
+  prepareManagedWorktree as prepareGitWorktree, type PreparedManagedWorktree } from "./git-worktrees.js";
 import {
   AccessDeniedError,
   assertAllowedPath,
@@ -84,6 +85,8 @@ export interface OpenWorkspaceInput {
   baseRef?: string;
   /** Internal durable provision identity; never a model-selected path. */
   managedKey?: string;
+  /** Internal crash-recovery receipt. Never accepted from a public model schema. */
+  preparedWorktree?: PreparedManagedWorktree;
 }
 
 export interface OpenWorkspaceOptions {
@@ -109,6 +112,14 @@ export class WorkspaceRegistry {
     private readonly restoreAllowedRoots?: (session: WorkspaceSession) => string[],
   ) {}
 
+  prepareWorktree(path: string, baseRef: string | undefined, allowedRoots: string[], managedKey: string): Promise<PreparedManagedWorktree> {
+    return prepareGitWorktree({ sourcePath: path, baseRef, config: this.config, allowedRoots, managedKey });
+  }
+
+  materializeWorktree(prepared: PreparedManagedWorktree): Promise<WorkspaceWorktree> {
+    return materializePreparedGitWorktree({ prepared, config: this.config });
+  }
+
   async openWorkspace(
     input: string | OpenWorkspaceInput,
     openOptions: OpenWorkspaceOptions = {},
@@ -132,6 +143,7 @@ export class WorkspaceRegistry {
         accessMode,
         accessGrantId,
         workspaceInput.managedKey,
+        workspaceInput.preparedWorktree,
       );
       return {
         ...context,
@@ -187,6 +199,7 @@ export class WorkspaceRegistry {
         accessMode,
         accessGrantId,
         options.managedKey,
+        options.preparedWorktree,
       );
     }
 
@@ -416,17 +429,22 @@ export class WorkspaceRegistry {
     accessMode: WorkspaceAccessMode,
     accessGrantId: string | undefined,
     managedKey?: string,
+    preparedWorktree?: PreparedManagedWorktree,
   ): Promise<WorkspaceContext> {
     if (accessMode !== "modify") {
       throw new AccessDeniedError("Worktree mode requires Modify access to the source repository.");
     }
-    const worktree = await createManagedWorktree({
-      sourcePath: path,
-      baseRef,
-      config: this.config,
-      allowedRoots,
-      managedKey,
-    });
+    const worktree = preparedWorktree
+      ? await materializePreparedGitWorktree({ prepared: preparedWorktree, config: this.config })
+      : await createManagedWorktree({ sourcePath: path, baseRef, config: this.config, allowedRoots, managedKey });
+
+    const persisted = this.store?.findActiveSessionByRoot(worktree.path, "worktree");
+    if (persisted && persisted.managed && persisted.sourceRoot === worktree.sourceRoot && persisted.baseSha === worktree.baseSha) {
+      const workspace = this.getWorkspace(persisted.id, { touch: false });
+      workspace.accessMode = accessMode;
+      workspace.accessGrantId = accessGrantId;
+      return this.reusedWorkspaceContext(workspace);
+    }
 
     return this.createWorkspaceContext({
       root: worktree.path,

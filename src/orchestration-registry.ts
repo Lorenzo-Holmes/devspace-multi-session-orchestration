@@ -1,4 +1,5 @@
-import { isAbsolute, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { isAbsolute, posix, resolve, win32 } from "node:path";
 import {
   OrchestrationStore,
   type OrchestrationEvent,
@@ -6,6 +7,8 @@ import {
   type OrchestrationFileIntent,
   type OrchestrationSession,
   type OrchestrationSessionState,
+  type OrchestrationTestRun,
+  type OrchestrationExecutionEvidence,
 } from "./orchestration-store.js";
 
 const transitions: Record<OrchestrationSessionState, ReadonlySet<OrchestrationSessionState>> = {
@@ -74,6 +77,22 @@ export class OrchestrationRegistry {
     return session;
   }
 
+  /** Starts a new authoritative worker for one logical session and fences the old one. */
+  restartWorker(sessionId: string, now = new Date().toISOString()): OrchestrationSession {
+    const result = this.store.transaction(() => {
+      const current = this.get(sessionId);
+      const updated = this.store.advanceWorkerIncarnation(sessionId, current.revision ?? 1, now);
+      this.store.appendEvent({ sessionId, kind: "worker_incarnation_started", detail: {
+        logicalSessionId: updated.logicalSessionId,
+        workerIncarnationId: updated.workerIncarnationId,
+        incarnation: updated.incarnation,
+      }, createdAt: now });
+      return updated;
+    });
+    this.changed(result.projectKey);
+    return result;
+  }
+
   /** Called only by the lease-fenced worktree provisioner; does not imply activity or liveness. */
   bindWorkspace(sessionId: string, projectKey: string, workspaceId: string, workspaceRoot: string): void {
     if (this.get(sessionId).projectKey !== projectKey) throw new Error("Session outside project scope.");
@@ -99,6 +118,7 @@ export class OrchestrationRegistry {
     nextState: OrchestrationSessionState,
     options: { task?: string; label?: string; now?: string } = {},
   ): OrchestrationSession {
+    const result = this.store.transaction(() => {
     const current = this.get(sessionId);
     if (current.state !== nextState && !transitions[current.state].has(nextState)) {
       throw new Error(
@@ -114,6 +134,7 @@ export class OrchestrationRegistry {
         lastActivityAt: options.now ?? new Date().toISOString(),
       },
       options.now,
+      current.revision,
     );
     if (current.state !== nextState) {
       this.store.appendEvent({
@@ -123,20 +144,24 @@ export class OrchestrationRegistry {
         createdAt: options.now,
       });
     }
-    this.changed(updated.projectKey);
     return updated;
+    });
+    this.changed(result.projectKey);
+    return result;
   }
 
   heartbeat(
     sessionId: string,
     options: { now?: string; detail?: Record<string, unknown> } = {},
   ): OrchestrationSession {
-    this.get(sessionId);
+    const result = this.store.transaction(() => {
+    const current = this.get(sessionId);
     const now = options.now ?? new Date().toISOString();
     const updated = this.store.updateSession(
       sessionId,
       { lastHeartbeatAt: now, lastActivityAt: now },
       now,
+      current.revision,
     );
     this.store.appendEvent({
       sessionId,
@@ -144,8 +169,10 @@ export class OrchestrationRegistry {
       detail: options.detail ?? {},
       createdAt: now,
     });
-    this.changed(updated.projectKey);
     return updated;
+    });
+    this.changed(result.projectKey);
+    return result;
   }
 
   recordEvent(input: {
@@ -154,12 +181,24 @@ export class OrchestrationRegistry {
     detail?: Record<string, unknown>;
     now?: string;
   }): { session: OrchestrationSession; event: OrchestrationEvent } {
+    const result = this.store.transaction(() => {
     const current = this.get(input.sessionId);
     const now = input.now ?? new Date().toISOString();
     const detail = input.detail ?? {};
     const patch: Partial<OrchestrationSession> = { lastActivityAt: now };
-    if (input.kind === "file_change") patch.lastFileChangeAt = now;
-    if (input.kind === "test_run") patch.lastTestAt = now;
+    if (input.kind === "file_change") {
+      patch.lastFileChangeAt = now;
+      patch.fileGeneration = (current.fileGeneration ?? 0) + 1;
+    }
+    if (input.kind === "test_run") {
+      patch.lastTestAttemptAt = now;
+      if (detail.passed === true && detail.trustLevel === "execution_observed") {
+        patch.lastTestAt = now;
+        patch.lastSuccessfulValidationAt = now;
+      } else if (detail.passed === false) {
+        patch.lastValidationFailureAt = now;
+      }
+    }
     if (input.kind === "error") {
       const fingerprint = typeof detail.fingerprint === "string" && detail.fingerprint.trim()
         ? detail.fingerprint.trim()
@@ -170,7 +209,7 @@ export class OrchestrationRegistry {
         : 1;
     } else if (
       input.kind === "success"
-      || (input.kind === "test_run" && detail.passed !== false)
+      || (input.kind === "test_run" && detail.passed === true && detail.trustLevel === "execution_observed")
     ) {
       patch.lastErrorFingerprint = undefined;
       patch.consecutiveErrorCount = 0;
@@ -183,20 +222,191 @@ export class OrchestrationRegistry {
         ? current.consecutiveErrorCount + 1
         : 1;
     }
-    const session = this.store.updateSession(input.sessionId, patch, now);
+    const session = this.store.updateSession(input.sessionId, patch, now, current.revision);
     const event = this.store.appendEvent({
       sessionId: input.sessionId,
       kind: input.kind,
       detail,
       createdAt: now,
     });
-    this.changed(session.projectKey);
     return { session, event };
+    });
+    this.changed(result.session.projectKey);
+    return result;
   }
 
   events(sessionId: string, limit = 100): OrchestrationEvent[] {
     this.get(sessionId);
     return this.store.listEvents(sessionId, limit);
+  }
+
+  beginTestRun(sessionId: string, input: {
+    kind: OrchestrationTestRun["kind"];
+    checkDefinition: string;
+    requiresTestCount: boolean;
+    command: string;
+    workingDirectory: string;
+    testedCommit?: string;
+    testedTree?: string;
+    environmentIdentity: string;
+    issuer: string;
+    now?: string;
+  }): OrchestrationTestRun {
+    const result = this.store.transaction(() => {
+      const current = this.get(sessionId);
+      const now = input.now ?? new Date().toISOString();
+      const activeAttempt = this.store.currentExecutionAttempt(sessionId);
+      if (activeAttempt && activeAttempt.workerIncarnationId !== current.workerIncarnationId) {
+        throw new Error("Current execution attempt belongs to an older worker incarnation.");
+      }
+      const run = this.store.createTestRun({
+        attemptId: activeAttempt?.attemptId ?? "attempt_" + randomUUID().replaceAll("-", "").slice(0, 20),
+        executionTaskId: activeAttempt?.taskId,
+        leaseGeneration: activeAttempt?.leaseGeneration,
+        projectKey: current.projectKey,
+        sessionId,
+        kind: input.kind,
+        checkDefinition: input.checkDefinition,
+        requiresTestCount: input.requiresTestCount,
+        command: input.command.slice(0, 32_768),
+        workingDirectory: input.workingDirectory,
+        testedCommit: input.testedCommit,
+        testedTree: input.testedTree,
+        environmentIdentity: input.environmentIdentity,
+        startedAt: now,
+        status: "started",
+        issuer: input.issuer,
+        trustLevel: "unverified",
+        sessionRevision: current.revision ?? 1,
+        workerIncarnation: current.incarnation ?? 1,
+        bindingGeneration: current.bindingGeneration ?? 1,
+        fileGeneration: current.fileGeneration ?? 0,
+      });
+      this.store.updateSession(sessionId, { lastActivityAt: now, lastTestAttemptAt: now }, now, current.revision);
+      this.store.appendEvent({ sessionId, kind: "test_run_started", detail: {
+        testRunId: run.testRunId, status: run.status, checkDefinition: run.checkDefinition,
+      }, createdAt: now });
+      return run;
+    });
+    this.changed(result.projectKey);
+    return result;
+  }
+
+  bindTestRunProcess(sessionId: string, testRunId: string, processSessionId: string): OrchestrationTestRun {
+    const result = this.store.transaction(() => {
+      const run = this.store.getTestRun(sessionId, testRunId);
+      if (!run) throw new Error("Unknown TestRun.");
+      return this.store.updateTestRun({ ...run, processSessionId, status: "running" }, run.revision);
+    });
+    this.changed(result.projectKey);
+    return result;
+  }
+
+  finishUnboundTestRun(sessionId: string, testRunId: string, reason: string, completedAt = new Date().toISOString()): OrchestrationTestRun {
+    const result = this.store.transaction(() => {
+      const run = this.store.getTestRun(sessionId, testRunId);
+      if (!run) throw new Error("Unknown TestRun.");
+      const current = this.get(sessionId);
+      const next = this.store.updateTestRun({ ...run, status: "unknown", completedAt,
+        reason, trustLevel: "unverified" }, run.revision);
+      this.store.updateSession(sessionId, { lastActivityAt: completedAt }, completedAt, current.revision);
+      this.store.appendEvent({ sessionId, kind: "test_run", detail: {
+        testRunId, status: "unknown", passed: false, reason, trustLevel: "unverified",
+      }, createdAt: completedAt });
+      return next;
+    });
+    this.changed(result.projectKey);
+    return result;
+  }
+
+  finishTestRun(sessionId: string, processSessionId: string, input: {
+    exitCode?: number;
+    signal?: string;
+    cancelled?: boolean;
+    timedOut?: boolean;
+    sourceStable: boolean;
+    positiveReceipt: boolean;
+    completedAt?: string;
+    reason?: string;
+  }): { run: OrchestrationTestRun; evidence?: OrchestrationExecutionEvidence } {
+    const result = this.store.transaction(() => {
+      const run = this.store.getTestRunByProcess(sessionId, processSessionId);
+      if (!run) throw new Error("Unknown TestRun process session.");
+      const current = this.get(sessionId);
+      const completedAt = input.completedAt ?? new Date().toISOString();
+      const activeAttempt = this.store.currentExecutionAttempt(sessionId);
+      const authorityStable = (current.incarnation ?? 1) === run.workerIncarnation
+        && (current.bindingGeneration ?? 1) === run.bindingGeneration
+        && (current.fileGeneration ?? 0) === run.fileGeneration
+        && (!run.executionTaskId || (activeAttempt?.taskId === run.executionTaskId
+          && activeAttempt.attemptId === run.attemptId
+          && activeAttempt.leaseGeneration === run.leaseGeneration
+          && activeAttempt.workerIncarnationId === current.workerIncarnationId));
+      let status: OrchestrationTestRun["status"];
+      let reason = input.reason;
+      if (input.cancelled) { status = "cancelled"; reason ??= "cancelled"; }
+      else if (input.timedOut) { status = "failed"; reason ??= "timeout"; }
+      else if (input.signal) { status = "failed"; reason ??= "signal"; }
+      else if (input.exitCode !== 0) { status = input.exitCode === undefined ? "unknown" : "failed"; reason ??= "nonzero_exit"; }
+      else if (!input.sourceStable) { status = "unknown"; reason ??= "source_changed"; }
+      else if (!authorityStable) { status = "unknown"; reason ??= "execution_authority_changed"; }
+      else if (!input.positiveReceipt) { status = "unknown"; reason ??= "positive_receipt_missing"; }
+      else { status = "passed"; }
+
+      let evidence: OrchestrationExecutionEvidence | undefined;
+      if (status === "passed" && run.testedCommit && run.testedTree) {
+        evidence = this.store.insertEvidence({ testRunId: run.testRunId, attemptId: run.attemptId,
+          executionTaskId: run.executionTaskId, leaseGeneration: run.leaseGeneration,
+          projectKey: run.projectKey, sessionId: run.sessionId, testedCommit: run.testedCommit,
+          testedTree: run.testedTree, checkDefinition: run.checkDefinition,
+          environmentIdentity: run.environmentIdentity, exitStatus: 0, startedAt: run.startedAt,
+          completedAt, issuer: run.issuer, trustLevel: "execution_observed",
+          workerIncarnation: run.workerIncarnation, bindingGeneration: run.bindingGeneration,
+          fileGeneration: run.fileGeneration });
+      }
+      const next = this.store.updateTestRun({ ...run, completedAt, exitCode: input.exitCode,
+        signal: input.signal, status, reason, evidenceId: evidence?.evidenceId,
+        trustLevel: status === "passed" ? "execution_observed" : "unverified" }, run.revision);
+
+      const patch: Partial<OrchestrationSession> = { lastActivityAt: completedAt };
+      if (status === "passed") {
+        patch.lastTestAt = completedAt;
+        patch.lastSuccessfulValidationAt = completedAt;
+        patch.lastValidatedCommit = next.testedCommit;
+        patch.lastValidatedTree = next.testedTree;
+        patch.lastValidatedFileGeneration = next.fileGeneration;
+        patch.lastErrorFingerprint = undefined;
+        patch.consecutiveErrorCount = 0;
+      } else if (status === "failed") {
+        patch.lastValidationFailureAt = completedAt;
+        patch.lastErrorFingerprint = "validation_failed";
+        patch.consecutiveErrorCount = current.lastErrorFingerprint === "validation_failed"
+          ? current.consecutiveErrorCount + 1 : 1;
+      }
+      this.store.updateSession(sessionId, patch, completedAt, current.revision);
+      this.store.appendEvent({ sessionId, kind: "test_run", detail: { testRunId: next.testRunId,
+        evidenceId: evidence?.evidenceId, passed: status === "passed", status,
+        trustLevel: next.trustLevel, exitCode: input.exitCode, signal: input.signal, reason }, createdAt: completedAt });
+      return { run: next, evidence };
+    });
+    this.changed(result.run.projectKey);
+    return result;
+  }
+
+  testRunByProcess(sessionId: string, processSessionId: string): OrchestrationTestRun | undefined {
+    this.get(sessionId);
+    return this.store.getTestRunByProcess(sessionId, processSessionId);
+  }
+
+  evidence(projectKey: string, sessionId: string, evidenceId: string): OrchestrationExecutionEvidence | undefined {
+    const session = this.get(sessionId);
+    if (session.projectKey !== projectKey) return undefined;
+    return this.store.getEvidence(projectKey, sessionId, evidenceId);
+  }
+
+  testRuns(sessionId: string, limit = 100): OrchestrationTestRun[] {
+    this.get(sessionId);
+    return this.store.listTestRuns(sessionId, limit);
   }
 
   setFileIntents(
@@ -205,19 +415,25 @@ export class OrchestrationRegistry {
     now?: string,
   ): OrchestrationFileIntent[] {
     this.get(sessionId);
-    if (intents.length > 200) throw new Error("At most 200 file intents are allowed per session.");
+    const normalizedIntents = new Map<string, { path: string; access: OrchestrationFileAccess }>();
     for (const intent of intents) {
-      const normalized = intent.path.replaceAll("\\", "/").replace(/^\.\//, "");
-      if (!normalized || normalized.length > 500 || isAbsolute(intent.path) || normalized === ".." || normalized.startsWith("../")) {
+      const normalized = posix.normalize(intent.path.replaceAll("\\", "/")).replace(/\/+$/, "");
+      if (!normalized || normalized === "." || normalized.length > 500 || isAbsolute(intent.path) || win32.isAbsolute(intent.path)
+        || /^[a-z]:/i.test(intent.path) || /[\x00-\x1f]/.test(intent.path) || normalized === ".." || normalized.startsWith("../")) {
         throw new Error("File intents must be non-empty workspace-relative paths without parent traversal.");
       }
+      normalizedIntents.set(intent.access + "\0" + normalized, { path: normalized, access: intent.access });
     }
-    const stored = this.store.replaceFileIntents(sessionId, intents, now);
+    if (normalizedIntents.size > 200) throw new Error("At most 200 file intents are allowed per session.");
+    const stored = this.store.transaction(() => {
+    const value = this.store.replaceFileIntents(sessionId, [...normalizedIntents.values()], now);
     this.store.appendEvent({
       sessionId,
       kind: "file_intents",
-      detail: { count: stored.length },
+      detail: { count: value.length },
       createdAt: now,
+    });
+    return value;
     });
     this.changed(this.get(sessionId).projectKey);
     return stored;
@@ -242,6 +458,18 @@ export class OrchestrationRegistry {
 
   close(): void {
     this.store.close();
+  }
+
+  all(projectKey: string): OrchestrationSession[] { return this.store.allSessions(projectKey); }
+
+  latestEvent(sessionId: string, kind: string): OrchestrationEvent | undefined {
+    this.get(sessionId);
+    return this.store.latestEvent(sessionId, kind);
+  }
+
+  event(sessionId: string, eventId: number): OrchestrationEvent | undefined {
+    this.get(sessionId);
+    return this.store.getEvent(sessionId, eventId);
   }
 }
 

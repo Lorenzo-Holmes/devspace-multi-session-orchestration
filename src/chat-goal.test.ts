@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -22,10 +22,16 @@ const shrimpDataRoot=process.env.DEVSPACE_CHAT_TEST_DATA_ROOT;
 const ok=(reply:ChatReply):any=>{assert.equal(reply.ok,true,JSON.stringify(reply));return reply.data;};
 async function fixture() {
   await mkdir(rootForTests,{recursive:true});
-  const root=await mkdtemp(join(rootForTests,"chat-goal-")),project=join(root,"project"),state=join(root,"controller");
-  await mkdir(project);
+  // CI temp roots can be lexical aliases of their canonical filesystem path
+  // (/var -> /private/var on macOS, and runner aliases on Windows). The product
+  // deliberately rejects a workspace whose authorized path resolves elsewhere,
+  // so fixtures must persist the same canonical path a real workspace would.
+  const root=await realpath(await mkdtemp(join(rootForTests,"chat-goal-")));
+  const projectPath=join(root,"project"),state=join(root,"controller");
+  await mkdir(projectPath);
+  const project=await realpath(projectPath);
   const base=shrimpDataRoot??join(root,"data");await mkdir(base,{recursive:true});
-  const dataRoot=await mkdtemp(join(base,"run-"));
+  const dataRoot=await realpath(await mkdtemp(join(await realpath(base),"run-")));
   let authorized=true,now=Date.now();
   const options={stateDir:state,config:{enabled:true,shrimpEntryPoint:shrimpEntry??join(root,"unused-shrimp.js"),dataRoot},now:()=>now};
   const context={ownerRef:"single-user",workspaceRoot:project,authorize:async()=>{if(!authorized)throw new Error("WORKSPACE_ACCESS_REQUIRED: test root revoked");}};

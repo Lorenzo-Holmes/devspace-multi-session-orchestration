@@ -34,7 +34,15 @@ export function localAgentDaemonPaths(
   platform: NodeJS.Platform = process.platform,
 ): LocalAgentDaemonPaths {
   const resolvedStateDir = resolve(stateDir);
-  const socketPath = join(resolvedStateDir, LOCAL_AGENT_DAEMON_SOCKET_NAME);
+  // AF_UNIX paths are severely bounded on macOS/Linux. State directories may
+  // legitimately be deep (CI runners and user profiles in particular), so a
+  // socket nested below stateDir can fail with EINVAL/ENAMETOOLONG. Keep all
+  // durable/secret files in the private stateDir, but use a deterministic,
+  // compact, user-owned runtime endpoint. /tmp has the sticky bit on supported
+  // Unix hosts; the socket itself is chmod 0600 immediately after bind.
+  const socketPath = platform === "win32"
+    ? join(resolvedStateDir, LOCAL_AGENT_DAEMON_SOCKET_NAME)
+    : join("/tmp", `devspace-agentd-${hashStateDir(resolvedStateDir)}.sock`);
   return {
     stateDir: resolvedStateDir,
     socketPath,

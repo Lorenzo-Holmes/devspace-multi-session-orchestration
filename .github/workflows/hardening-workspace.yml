@@ -1,0 +1,56 @@
+name: Hardening workspace bootstrap
+
+on:
+  push:
+    branches:
+      - pro/v2.1-reliability-hardening
+    paths:
+      - .github/workflows/hardening-workspace.yml
+
+permissions:
+  contents: read
+
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Archive public source for offline verification
+        run: |
+          mkdir -p "$RUNNER_TEMP/hardening-source"
+          git bundle create "$RUNNER_TEMP/hardening-source/source.bundle" --all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hardening-source
+          path: ${{ runner.temp }}/hardening-source/source.bundle
+          retention-days: 1
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2
+        with:
+          runtime: node@24.19.0
+          cache: true
+          install: false
+      - name: Runtime versions
+        shell: bash
+        run: |
+          node --version
+          node -p "'ABI=' + process.versions.modules + ' executable=' + process.execPath"
+          pnpm --version
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Archive disposable dependency environment
+        run: |
+          mkdir -p "$RUNNER_TEMP/hardening-runtime"
+          cp -L "$(command -v node)" "$RUNNER_TEMP/hardening-runtime/node"
+          tar -czf "$RUNNER_TEMP/hardening-runtime/node_modules.tar.gz" node_modules
+          du -sh "$RUNNER_TEMP/hardening-runtime"/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hardening-runtime
+          path: ${{ runner.temp }}/hardening-runtime/
+          compression-level: 0
+          retention-days: 1

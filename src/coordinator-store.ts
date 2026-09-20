@@ -22,6 +22,9 @@ export interface CoordinatorTask {
   ownerSessionId?: string;
   leaseToken?: string;
   leaseExpiresAt?: string;
+  attemptId?: string;
+  leaseGeneration: number;
+  ownerWorkerIncarnationId?: string;
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -39,6 +42,9 @@ interface TaskRow {
   owner_session_id: string | null;
   lease_token: string | null;
   lease_expires_at: string | null;
+  attempt_id: string | null;
+  lease_generation: number;
+  owner_worker_incarnation_id: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -110,23 +116,62 @@ export class CoordinatorStore {
     return rows.map((row) => this.taskFromRow(row));
   }
 
+  /** Scheduling is not a page of history. Filter eligibility before ordering. */
+  readyTasks(projectKey: string, now: string): CoordinatorTask[] {
+    if (!Number.isFinite(Date.parse(now))) throw new Error("Invalid coordinator clock.");
+    const rows = this.database.sqlite.prepare(`
+      select task.* from coordinator_tasks task
+      where task.project_key = ?
+        and (task.state = 'pending' or
+          (task.state = 'claimed' and julianday(task.lease_expires_at) <= julianday(?)))
+        and not exists (
+          select 1 from coordinator_task_dependencies dep
+          left join coordinator_tasks parent on parent.id = dep.depends_on_task_id
+          where dep.task_id = task.id and
+            (parent.id is null or parent.project_key <> task.project_key or parent.state <> 'completed')
+        )
+      order by task.priority desc, task.created_at asc, task.id asc
+    `).all(projectKey, now) as TaskRow[];
+    return rows.map((row) => this.taskFromRow(row));
+  }
+
   updateClaim(input: {
     taskId: string;
     expectedRevision: number;
     ownerSessionId: string;
     leaseToken: string;
     leaseExpiresAt: string;
+    attemptId?: string;
+    ownerWorkerIncarnationId?: string;
     now: string;
   }): CoordinatorTask {
+    const attemptId = input.attemptId ?? "attempt_" + randomUUID().replaceAll("-", "").slice(0, 20);
+    const workerIncarnationId = input.ownerWorkerIncarnationId ?? (this.database.sqlite.prepare(
+      "select worker_incarnation_id from orchestration_sessions where id = ?",
+    ).get(input.ownerSessionId) as { worker_incarnation_id: string | null } | undefined)?.worker_incarnation_id;
+    if (!workerIncarnationId) throw new Error("Coordinator claim requires a durable worker incarnation.");
     const result = this.database.sqlite.prepare(
-      "update coordinator_tasks set state = 'claimed', owner_session_id = ?, lease_token = ?, lease_expires_at = ?, revision = revision + 1, updated_at = ? where id = ? and revision = ?",
+      `update coordinator_tasks set state = 'claimed', owner_session_id = ?, lease_token = ?, lease_expires_at = ?,
+       attempt_id = ?, lease_generation = lease_generation + 1, owner_worker_incarnation_id = ?, revision = revision + 1, updated_at = ?
+       where id = ? and revision = ?
+         and (state = 'pending' or (state = 'claimed' and julianday(lease_expires_at) <= julianday(?)))
+         and exists (select 1 from orchestration_sessions owner where owner.id = ?
+           and owner.project_key = coordinator_tasks.project_key and owner.state not in ('completed', 'failed', 'abandoned'))
+         and not exists (select 1 from coordinator_task_dependencies dep
+           left join coordinator_tasks parent on parent.id = dep.depends_on_task_id
+           where dep.task_id = coordinator_tasks.id and
+             (parent.id is null or parent.project_key <> coordinator_tasks.project_key or parent.state <> 'completed'))`,
     ).run(
       input.ownerSessionId,
       input.leaseToken,
       input.leaseExpiresAt,
+      attemptId,
+      workerIncarnationId,
       input.now,
       input.taskId,
       input.expectedRevision,
+      input.now,
+      input.ownerSessionId,
     );
     if (result.changes !== 1) throw new Error("Coordinator task revision conflict.");
     return this.getTask(input.taskId)!;
@@ -140,13 +185,19 @@ export class CoordinatorStore {
     now: string;
   }): CoordinatorTask {
     const result = this.database.sqlite.prepare(
-      "update coordinator_tasks set state = 'pending', owner_session_id = null, lease_token = null, lease_expires_at = null, revision = revision + 1, updated_at = ? where id = ? and revision = ? and state = 'claimed' and owner_session_id = ? and lease_token = ?",
+      `update coordinator_tasks set state = 'pending', owner_session_id = null, lease_token = null, lease_expires_at = null,
+       attempt_id = null, owner_worker_incarnation_id = null, revision = revision + 1, updated_at = ?
+       where id = ? and revision = ? and state = 'claimed' and owner_session_id = ? and lease_token = ?
+         and julianday(lease_expires_at) > julianday(?)
+         and owner_worker_incarnation_id = (select worker_incarnation_id from orchestration_sessions where id = ?)`,
     ).run(
       input.now,
       input.taskId,
       input.expectedRevision,
       input.ownerSessionId,
       input.leaseToken,
+      input.now,
+      input.ownerSessionId,
     );
     if (result.changes !== 1) throw new Error("Coordinator lease or revision mismatch.");
     return this.getTask(input.taskId)!;
@@ -160,7 +211,11 @@ export class CoordinatorStore {
     now: string;
   }): CoordinatorTask {
     const result = this.database.sqlite.prepare(
-      "update coordinator_tasks set state = 'completed', owner_session_id = null, lease_token = null, lease_expires_at = null, completed_at = ?, revision = revision + 1, updated_at = ? where id = ? and revision = ? and state = 'claimed' and owner_session_id = ? and lease_token = ?",
+      `update coordinator_tasks set state = 'completed', owner_session_id = null, lease_token = null, lease_expires_at = null,
+       completed_at = ?, revision = revision + 1, updated_at = ?
+       where id = ? and revision = ? and state = 'claimed' and owner_session_id = ? and lease_token = ?
+         and julianday(lease_expires_at) > julianday(?)
+         and owner_worker_incarnation_id = (select worker_incarnation_id from orchestration_sessions where id = ?)`,
     ).run(
       input.now,
       input.now,
@@ -168,6 +223,8 @@ export class CoordinatorStore {
       input.expectedRevision,
       input.ownerSessionId,
       input.leaseToken,
+      input.now,
+      input.ownerSessionId,
     );
     if (result.changes !== 1) throw new Error("Coordinator lease or revision mismatch.");
     return this.getTask(input.taskId)!;
@@ -200,6 +257,12 @@ export class CoordinatorStore {
     this.database.close();
   }
 
+  allTasks(projectKey: string): CoordinatorTask[] {
+    const rows = this.database.sqlite.prepare("select * from coordinator_tasks where project_key = ? order by priority desc, created_at asc, id asc")
+      .all(projectKey) as TaskRow[];
+    return rows.map(row => this.taskFromRow(row));
+  }
+
   private taskFromRow(row: TaskRow): CoordinatorTask {
     const dependencies = this.database.sqlite.prepare(
       "select task_id, depends_on_task_id from coordinator_task_dependencies where task_id = ? order by depends_on_task_id asc",
@@ -215,6 +278,9 @@ export class CoordinatorStore {
       ownerSessionId: row.owner_session_id ?? undefined,
       leaseToken: row.lease_token ?? undefined,
       leaseExpiresAt: row.lease_expires_at ?? undefined,
+      attemptId: row.attempt_id ?? undefined,
+      leaseGeneration: row.lease_generation,
+      ownerWorkerIncarnationId: row.owner_worker_incarnation_id ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       completedAt: row.completed_at ?? undefined,
