@@ -22,6 +22,9 @@ export interface CoordinatorTask {
   ownerSessionId?: string;
   leaseToken?: string;
   leaseExpiresAt?: string;
+  attemptId?: string;
+  leaseGeneration: number;
+  ownerWorkerIncarnationId?: string;
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -39,6 +42,9 @@ interface TaskRow {
   owner_session_id: string | null;
   lease_token: string | null;
   lease_expires_at: string | null;
+  attempt_id: string | null;
+  lease_generation: number;
+  owner_worker_incarnation_id: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -135,10 +141,18 @@ export class CoordinatorStore {
     ownerSessionId: string;
     leaseToken: string;
     leaseExpiresAt: string;
+    attemptId?: string;
+    ownerWorkerIncarnationId?: string;
     now: string;
   }): CoordinatorTask {
+    const attemptId = input.attemptId ?? "attempt_" + randomUUID().replaceAll("-", "").slice(0, 20);
+    const workerIncarnationId = input.ownerWorkerIncarnationId ?? (this.database.sqlite.prepare(
+      "select worker_incarnation_id from orchestration_sessions where id = ?",
+    ).get(input.ownerSessionId) as { worker_incarnation_id: string | null } | undefined)?.worker_incarnation_id;
+    if (!workerIncarnationId) throw new Error("Coordinator claim requires a durable worker incarnation.");
     const result = this.database.sqlite.prepare(
-      `update coordinator_tasks set state = 'claimed', owner_session_id = ?, lease_token = ?, lease_expires_at = ?, revision = revision + 1, updated_at = ?
+      `update coordinator_tasks set state = 'claimed', owner_session_id = ?, lease_token = ?, lease_expires_at = ?,
+       attempt_id = ?, lease_generation = lease_generation + 1, owner_worker_incarnation_id = ?, revision = revision + 1, updated_at = ?
        where id = ? and revision = ?
          and (state = 'pending' or (state = 'claimed' and julianday(lease_expires_at) <= julianday(?)))
          and exists (select 1 from orchestration_sessions owner where owner.id = ?
@@ -151,6 +165,8 @@ export class CoordinatorStore {
       input.ownerSessionId,
       input.leaseToken,
       input.leaseExpiresAt,
+      attemptId,
+      workerIncarnationId,
       input.now,
       input.taskId,
       input.expectedRevision,
@@ -169,7 +185,11 @@ export class CoordinatorStore {
     now: string;
   }): CoordinatorTask {
     const result = this.database.sqlite.prepare(
-      "update coordinator_tasks set state = 'pending', owner_session_id = null, lease_token = null, lease_expires_at = null, revision = revision + 1, updated_at = ? where id = ? and revision = ? and state = 'claimed' and owner_session_id = ? and lease_token = ? and julianday(lease_expires_at) > julianday(?)",
+      `update coordinator_tasks set state = 'pending', owner_session_id = null, lease_token = null, lease_expires_at = null,
+       attempt_id = null, owner_worker_incarnation_id = null, revision = revision + 1, updated_at = ?
+       where id = ? and revision = ? and state = 'claimed' and owner_session_id = ? and lease_token = ?
+         and julianday(lease_expires_at) > julianday(?)
+         and owner_worker_incarnation_id = (select worker_incarnation_id from orchestration_sessions where id = ?)`,
     ).run(
       input.now,
       input.taskId,
@@ -177,6 +197,7 @@ export class CoordinatorStore {
       input.ownerSessionId,
       input.leaseToken,
       input.now,
+      input.ownerSessionId,
     );
     if (result.changes !== 1) throw new Error("Coordinator lease or revision mismatch.");
     return this.getTask(input.taskId)!;
@@ -190,7 +211,11 @@ export class CoordinatorStore {
     now: string;
   }): CoordinatorTask {
     const result = this.database.sqlite.prepare(
-      "update coordinator_tasks set state = 'completed', owner_session_id = null, lease_token = null, lease_expires_at = null, completed_at = ?, revision = revision + 1, updated_at = ? where id = ? and revision = ? and state = 'claimed' and owner_session_id = ? and lease_token = ? and julianday(lease_expires_at) > julianday(?)",
+      `update coordinator_tasks set state = 'completed', owner_session_id = null, lease_token = null, lease_expires_at = null,
+       completed_at = ?, revision = revision + 1, updated_at = ?
+       where id = ? and revision = ? and state = 'claimed' and owner_session_id = ? and lease_token = ?
+         and julianday(lease_expires_at) > julianday(?)
+         and owner_worker_incarnation_id = (select worker_incarnation_id from orchestration_sessions where id = ?)`,
     ).run(
       input.now,
       input.now,
@@ -199,6 +224,7 @@ export class CoordinatorStore {
       input.ownerSessionId,
       input.leaseToken,
       input.now,
+      input.ownerSessionId,
     );
     if (result.changes !== 1) throw new Error("Coordinator lease or revision mismatch.");
     return this.getTask(input.taskId)!;
@@ -252,6 +278,9 @@ export class CoordinatorStore {
       ownerSessionId: row.owner_session_id ?? undefined,
       leaseToken: row.lease_token ?? undefined,
       leaseExpiresAt: row.lease_expires_at ?? undefined,
+      attemptId: row.attempt_id ?? undefined,
+      leaseGeneration: row.lease_generation,
+      ownerWorkerIncarnationId: row.owner_worker_incarnation_id ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       completedAt: row.completed_at ?? undefined,

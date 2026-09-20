@@ -18,6 +18,8 @@ export const handoffInputSchema = z.object({
 type HandoffInput = z.infer<typeof handoffInputSchema>;
 export interface HandoffCheckpoint extends DurableRecord, HandoffInput {
   handoffId: string; state: "pending" | "acknowledged"; acknowledgedAt?: string; acknowledgedBy?: string;
+  senderLogicalSessionId?: string; senderWorkerIncarnationId?: string;
+  executionAttemptId?: string; leaseGeneration?: number; bindingGeneration?: number;
 }
 export class HandoffManager {
   constructor(private readonly store: OrchestrationV2Store, private readonly sessions: OrchestrationRegistry,
@@ -30,18 +32,27 @@ export class HandoffManager {
   create(project: string, raw: z.input<typeof handoffInputSchema>): HandoffCheckpoint {
     const input = handoffInputSchema.parse(raw);
     if (Buffer.byteLength(JSON.stringify(input)) > 64 * 1024) throw new Error("Handoff payload exceeds 64 KiB bound.");
-    this.session(project, input.fromSessionId);
+    const sender = this.session(project, input.fromSessionId);
     if (input.toSessionId) this.session(project, input.toSessionId);
     if (input.toSessionId === input.fromSessionId) throw new Error("Handoff receiver must be a different session.");
+    let authority: Pick<HandoffCheckpoint, "executionAttemptId" | "leaseGeneration"> = {};
     if (input.taskId) {
       const task = this.coordinator.get(input.taskId), binding = this.bindings.get(project, input.taskId);
       if (task.projectKey !== project || (task.ownerSessionId !== input.fromSessionId && binding?.sessionId !== input.fromSessionId)) {
         throw new Error("Handoff task is not owned by sender in current project scope.");
       }
+      if (!task.attemptId || !binding || binding.attemptId !== task.attemptId || binding.leaseGeneration !== task.leaseGeneration
+        || binding.workerIncarnationId !== sender.workerIncarnationId
+        || (task.ownerWorkerIncarnationId && task.ownerWorkerIncarnationId !== sender.workerIncarnationId)) {
+        throw new Error("Handoff execution authority is stale.");
+      }
+      authority = { executionAttemptId: task.attemptId, leaseGeneration: task.leaseGeneration };
     }
     const id = "handoff_" + randomUUID(), now = new Date().toISOString();
     return this.store.insert<HandoffCheckpoint>("handoff_checkpoints", {
-      ...input, id, handoffId: id, projectKey: project, state: "pending", revision: 1, createdAt: now, updatedAt: now,
+      ...input, ...authority, senderLogicalSessionId: sender.logicalSessionId,
+      senderWorkerIncarnationId: sender.workerIncarnationId, bindingGeneration: sender.bindingGeneration,
+      id, handoffId: id, projectKey: project, state: "pending", revision: 1, createdAt: now, updatedAt: now,
     });
   }
   get(project: string, id: string): HandoffCheckpoint {
@@ -56,6 +67,16 @@ export class HandoffManager {
     if (current.fromSessionId === receiverId || (current.toSessionId && current.toSessionId !== receiverId)
       || (current.acknowledgedBy && current.acknowledgedBy !== receiverId)) throw new Error("Handoff acknowledgement requires the intended receiver.");
     if (current.state === "acknowledged") return current;
+    const sender = this.session(project, current.fromSessionId);
+    if (current.senderLogicalSessionId && (sender.logicalSessionId !== current.senderLogicalSessionId
+      || sender.workerIncarnationId !== current.senderWorkerIncarnationId
+      || sender.bindingGeneration !== current.bindingGeneration)) throw new Error("Handoff sender authority has been superseded.");
+    if (current.taskId && current.executionAttemptId) {
+      const task = this.coordinator.get(current.taskId);
+      if (task.attemptId !== current.executionAttemptId || task.leaseGeneration !== current.leaseGeneration) {
+        throw new Error("Handoff execution attempt has been superseded.");
+      }
+    }
     const now = new Date().toISOString();
     return this.store.update<HandoffCheckpoint>("handoff_checkpoints", {
       ...current, state: "acknowledged", acknowledgedBy: receiverId, acknowledgedAt: now, updatedAt: now,

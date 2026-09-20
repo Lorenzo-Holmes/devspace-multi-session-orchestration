@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import type { WorkspaceRegistry, Workspace } from "./workspaces.js";
+import type { PreparedManagedWorktree } from "./git-worktrees.js";
 import type { WorkspaceAccessManager } from "./workspace-access.js";
 import type { OrchestrationCoordinator } from "./orchestration-coordinator.js";
 import type { OrchestrationRegistry } from "./orchestration-registry.js";
@@ -17,6 +19,14 @@ export interface WorktreeBinding extends DurableRecord {
   ref?: string;
   managed: true;
   dirtySource?: boolean;
+  operationId?: string;
+  attemptId?: string;
+  leaseGeneration?: number;
+  workerIncarnationId?: string;
+  baseOid?: string;
+  expectedWorktreePath?: string;
+  operationPhase?: "reserved" | "git_created" | "workspace_registered" | "binding_active" | "quarantined" | "failed";
+  operationError?: string;
   status: "provisioning" | "active" | "cleanup_eligible";
 }
 export interface ProvisionInput {
@@ -41,12 +51,18 @@ export class WorktreeOrchestrator {
   async provision(source: Workspace, input: ProvisionInput): Promise<WorktreeBinding> {
     this.access.assertWorkspaceModifiable(source);
     const projectKey = projectKeyForWorkspace(source);
-    this.assertLease(projectKey, input);
+    const authority = this.assertLease(projectKey, input);
     if (this.list(projectKey, 500).some(binding => binding.sessionId === input.sessionId && binding.taskId !== input.taskId
       && !["completed", "failed", "cancelled"].includes(this.coordinator.get(binding.taskId).state))) {
       throw new Error("Session already has another active task worktree binding.");
     }
     const current = this.get(projectKey, input.taskId);
+    if (current?.attemptId && current.attemptId !== authority.task.attemptId) {
+      throw new Error("Task worktree binding belongs to an older execution attempt.");
+    }
+    if (current?.workerIncarnationId && current.workerIncarnationId !== authority.session.workerIncarnationId) {
+      throw new Error("Task worktree binding belongs to an older worker incarnation.");
+    }
     if (current && (current.sessionId !== input.sessionId || (input.baseRef && current.baseRef !== input.baseRef))) {
       throw new Error("Task worktree binding already belongs to another session or base ref.");
     }
@@ -64,29 +80,69 @@ export class WorktreeOrchestrator {
     try { return await operation; } finally { this.pending.delete(input.taskId); }
   }
   private async provisionReserved(source: Workspace, projectKey: string, input: ProvisionInput): Promise<WorktreeBinding> {
+    const existing = this.get(projectKey, input.taskId);
+    const authority = this.assertLease(projectKey, input);
+    let prepared: PreparedManagedWorktree;
+    if (existing?.baseOid && existing.expectedWorktreePath) {
+      prepared = { sourceRoot: existing.sourceRoot, path: existing.expectedWorktreePath,
+        baseRef: existing.baseRef, baseSha: existing.baseOid, dirtySource: existing.dirtySource ?? false,
+        detached: true, managed: true };
+    } else {
+      prepared = await this.workspaces.prepareWorktree(source.sourceRoot ?? source.root, input.baseRef ?? "HEAD",
+        this.access.workspaceRestoreAllowedRoots(source), projectKey + ":" + input.taskId);
+      // HEAD/ref may move while preparing; the lease/worker may also change. Only
+      // the immutable OID/path below are persisted after revalidating authority.
+      this.assertLease(projectKey, input);
+    }
     const now = new Date().toISOString();
     const reservation = this.store.transaction(() => this.get(projectKey, input.taskId) ?? this.store.insert<WorktreeBinding>("worktree_bindings", {
       id: input.taskId, taskId: input.taskId, projectKey, sessionId: input.sessionId,
-      sourceRoot: source.sourceRoot ?? source.root, baseRef: input.baseRef ?? "HEAD", managed: true,
-      status: "provisioning", revision: 1, createdAt: now, updatedAt: now,
+      sourceRoot: prepared.sourceRoot, baseRef: prepared.baseRef, baseOid: prepared.baseSha,
+      expectedWorktreePath: prepared.path, dirtySource: prepared.dirtySource,
+      operationId: "wtop_" + randomUUID().replaceAll("-", "").slice(0, 20),
+      attemptId: authority.task.attemptId, leaseGeneration: authority.task.leaseGeneration,
+      workerIncarnationId: authority.session.workerIncarnationId, operationPhase: "reserved",
+      managed: true, status: "provisioning", revision: 1, createdAt: now, updatedAt: now,
     }));
     if (reservation.sessionId !== input.sessionId) throw new Error("Task binding belongs to another session.");
+    if (reservation.attemptId !== authority.task.attemptId || reservation.workerIncarnationId !== authority.session.workerIncarnationId
+      || reservation.leaseGeneration !== authority.task.leaseGeneration) {
+      throw new Error("Worktree reservation is fenced by a newer execution attempt.");
+    }
+    try {
+      await this.workspaces.materializeWorktree(prepared);
+    } catch (error) {
+      const current = this.get(projectKey, input.taskId)!;
+      this.store.update("worktree_bindings", { ...current, operationPhase: "quarantined" as const,
+        operationError: "materialize_failed", updatedAt: new Date().toISOString() }, current.revision);
+      throw error;
+    }
+    let current = this.get(projectKey, input.taskId)!;
+    if (current.operationPhase === "reserved") current = this.store.update("worktree_bindings", {
+      ...current, operationPhase: "git_created" as const, updatedAt: new Date().toISOString(),
+    }, current.revision);
     const { workspace } = await this.workspaces.openWorkspace({
       path: reservation.sourceRoot, mode: "worktree", baseRef: reservation.baseRef,
-      managedKey: projectKey + ":" + input.taskId,
+      managedKey: projectKey + ":" + input.taskId, preparedWorktree: prepared,
     }, { allowedRoots: this.access.workspaceRestoreAllowedRoots(source), accessMode: source.accessMode, accessGrantId: source.accessGrantId });
     // A slow provision must not bypass a changed/expired coordinator lease.
-    this.assertLease(projectKey, input);
+    const finalAuthority = this.assertLease(projectKey, input);
     if (projectKeyForWorkspace(workspace) !== projectKey) throw new Error("Worktree project scope differs from source; open the repository root before provisioning.");
-    const existing = this.get(projectKey, input.taskId)!;
-    if (existing.workspaceId) return existing;
-    const binding = this.store.update("worktree_bindings", {
-      ...existing, workspaceId: workspace.id, worktreeRoot: workspace.root,
+    current = this.get(projectKey, input.taskId)!;
+    if (current.attemptId !== finalAuthority.task.attemptId || current.workerIncarnationId !== finalAuthority.session.workerIncarnationId
+      || current.leaseGeneration !== finalAuthority.task.leaseGeneration) throw new Error("Worktree activation fenced by newer execution authority.");
+    if (!current.workspaceId) current = this.store.update("worktree_bindings", {
+      ...current, workspaceId: workspace.id, worktreeRoot: workspace.root,
       baseSha: workspace.worktree!.baseSha, ref: "detached:" + workspace.worktree!.baseSha,
-      dirtySource: workspace.worktree!.dirtySource, status: "active" as const, updatedAt: new Date().toISOString(),
-    }, existing.revision);
+      operationPhase: "workspace_registered" as const, updatedAt: new Date().toISOString(),
+    }, current.revision);
     this.sessions.bindWorkspace(input.sessionId, projectKey, workspace.id, workspace.root);
-    return binding;
+    current = this.get(projectKey, input.taskId)!;
+    if (current.status !== "active" || current.operationPhase !== "binding_active") current = this.store.update("worktree_bindings", {
+      ...current, status: "active" as const, operationPhase: "binding_active" as const,
+      updatedAt: new Date().toISOString(),
+    }, current.revision);
+    return current;
   }
   cleanup(projectKey: string, taskId: string, expectedRevision: number): WorktreeBinding {
     const binding = this.get(projectKey, taskId);
@@ -95,12 +151,14 @@ export class WorktreeOrchestrator {
     if (!["completed", "failed", "cancelled"].includes(task.state)) throw new Error("Active task is not eligible for cleanup.");
     return this.store.update("worktree_bindings", { ...binding, status: "cleanup_eligible" as const, updatedAt: new Date().toISOString() }, expectedRevision);
   }
-  private assertLease(projectKey: string, input: ProvisionInput): void {
+  private assertLease(projectKey: string, input: ProvisionInput) {
     const task = this.coordinator.get(input.taskId), session = this.sessions.get(input.sessionId);
     if (task.projectKey !== projectKey || session.projectKey !== projectKey) throw new Error("Task/session outside current project scope.");
     if (task.revision !== input.expectedRevision) throw new Error("Coordinator revision conflict.");
     if (task.state !== "claimed" || task.ownerSessionId !== session.id || task.leaseToken !== input.leaseToken
+      || !task.attemptId || !task.ownerWorkerIncarnationId || task.ownerWorkerIncarnationId !== session.workerIncarnationId
       || !task.leaseExpiresAt || Date.parse(task.leaseExpiresAt) <= Date.now()
       || ["completed", "failed", "abandoned"].includes(session.state)) throw new Error("Valid task lease for this session is required.");
+    return { task, session };
   }
 }

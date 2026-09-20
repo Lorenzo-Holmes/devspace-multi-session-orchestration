@@ -16,8 +16,9 @@ import {
   type WriteToolInput,
   type AgentToolResult,
 } from "@earendil-works/pi-coding-agent";
-import { realpath } from "node:fs/promises";
-import { assertAllowedPath, resolveAllowedPath } from "./roots.js";
+import { lstat, realpath } from "node:fs/promises";
+import { dirname } from "node:path";
+import { assertAllowedPath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
 
 type McpContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 export type ToolResponse<TDetails = unknown> = {
@@ -109,7 +110,7 @@ export async function grepFilesTool(
 }
 
 export async function writeFileTool(input: WriteToolInput, context: ToolContext): Promise<ToolResponse> {
-  const path = resolveAllowedPath(input.path, context.cwd, [context.root]);
+  const path = await resolveMutationAllowedPath(input.path, context.cwd, context.root);
   const tool = createWriteTool(context.cwd);
 
   return runTool((params) => tool.execute("write_file", params), {
@@ -119,7 +120,7 @@ export async function writeFileTool(input: WriteToolInput, context: ToolContext)
 }
 
 export async function editFileTool(input: EditToolInput, context: ToolContext): Promise<ToolResponse<EditToolDetails>> {
-  const path = resolveAllowedPath(input.path, context.cwd, [context.root]);
+  const path = await resolveMutationAllowedPath(input.path, context.cwd, context.root);
   const tool = createEditTool(context.cwd);
 
   return runTool((params) => tool.execute("edit_file", params), {
@@ -149,4 +150,37 @@ async function resolveRealAllowedPath(
     ...allowedRoots.map((root) => realpath(root)),
   ]);
   return assertAllowedPath(resolvedPath, resolvedRoots);
+}
+
+async function resolveMutationAllowedPath(inputPath: string, cwd: string, root: string): Promise<string> {
+  const lexical = resolveAllowedPath(inputPath, cwd, [root]);
+  const canonicalRoot = await realpath(root);
+  const existing = await lstat(lexical).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (existing?.isSymbolicLink()) throw new Error(`Mutation target must not be a symlink or junction: ${inputPath}`);
+  if (existing) {
+    const target = await realpath(lexical);
+    if (!isPathInsideRoot(target, canonicalRoot)) throw new Error(`Mutation target resolves outside the workspace: ${inputPath}`);
+  }
+  // For a new path, find the nearest existing ancestor. Every missing child
+  // will be created below this already-canonical in-workspace directory.
+  let parent = dirname(lexical);
+  while (true) {
+    try {
+      const canonicalParent = await realpath(parent);
+      if (!isPathInsideRoot(canonicalParent, canonicalRoot)) {
+        throw new Error(`Mutation parent resolves outside the workspace: ${inputPath}`);
+      }
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw error;
+      const next = dirname(parent);
+      if (next === parent || !isPathInsideRoot(parent, root)) throw new Error(`Mutation path escapes the workspace: ${inputPath}`);
+      parent = next;
+    }
+  }
+  return lexical;
 }

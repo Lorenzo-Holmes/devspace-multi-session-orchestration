@@ -19,6 +19,10 @@ export type OrchestrationFileAccess = "read" | "write";
 
 export interface OrchestrationSession {
   id: string;
+  /** Present for persisted sessions; optional only for legacy in-memory fixtures. */
+  logicalSessionId?: string;
+  /** Present for persisted sessions; optional only for legacy in-memory fixtures. */
+  workerIncarnationId?: string;
   projectKey: string;
   workspaceId?: string;
   workspaceRoot: string;
@@ -64,6 +68,8 @@ export interface OrchestrationFileIntent {
 
 interface SessionRow {
   id: string;
+  logical_session_id: string | null;
+  worker_incarnation_id: string | null;
   project_key: string;
   workspace_id: string | null;
   workspace_root: string;
@@ -111,6 +117,8 @@ export type OrchestrationTestRunStatus = "started" | "running" | "passed" | "fai
 export interface OrchestrationTestRun {
   testRunId: string;
   attemptId: string;
+  executionTaskId?: string;
+  leaseGeneration?: number;
   processSessionId?: string;
   projectKey: string;
   sessionId: string;
@@ -142,6 +150,8 @@ export interface OrchestrationExecutionEvidence {
   evidenceId: string;
   testRunId: string;
   attemptId: string;
+  executionTaskId?: string;
+  leaseGeneration?: number;
   projectKey: string;
   sessionId: string;
   testedCommit: string;
@@ -178,8 +188,11 @@ export class OrchestrationStore {
     now?: string;
   }): OrchestrationSession {
     const now = input.now ?? new Date().toISOString();
+    const id = input.id ?? "sess_" + randomUUID().replaceAll("-", "").slice(0, 12);
     const session: OrchestrationSession = {
-      id: input.id ?? "sess_" + randomUUID().replaceAll("-", "").slice(0, 12),
+      id,
+      logicalSessionId: "logical_" + id,
+      workerIncarnationId: "worker_" + randomUUID().replaceAll("-", "").slice(0, 20),
       projectKey: input.projectKey,
       workspaceId: input.workspaceId,
       workspaceRoot: resolve(input.workspaceRoot),
@@ -198,9 +211,13 @@ export class OrchestrationStore {
       updatedAt: now,
     };
     this.database.sqlite.prepare(
-      "insert into orchestration_sessions (id, project_key, workspace_id, workspace_root, session_kind, external_session_id, label, state, task, last_activity_at, consecutive_error_count, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      `insert into orchestration_sessions (id, logical_session_id, worker_incarnation_id, project_key, workspace_id, workspace_root,
+       session_kind, external_session_id, label, state, task, last_activity_at, consecutive_error_count, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       session.id,
+      session.logicalSessionId,
+      session.workerIncarnationId,
       session.projectKey,
       session.workspaceId ?? null,
       session.workspaceRoot,
@@ -215,6 +232,30 @@ export class OrchestrationStore {
       session.updatedAt,
     );
     return session;
+  }
+
+  advanceWorkerIncarnation(id: string, expectedRevision: number, now = new Date().toISOString()): OrchestrationSession {
+    const workerIncarnationId = "worker_" + randomUUID().replaceAll("-", "").slice(0, 20);
+    const result = this.database.sqlite.prepare(`update orchestration_sessions
+      set incarnation = incarnation + 1, worker_incarnation_id = ?, revision = revision + 1,
+          last_activity_at = ?, updated_at = ?
+      where id = ? and revision = ? and state not in ('completed','failed','abandoned')`)
+      .run(workerIncarnationId, now, now, id, expectedRevision);
+    if (result.changes !== 1) throw new Error("Session worker incarnation conflict or terminal session.");
+    return this.getSession(id)!;
+  }
+
+  currentExecutionAttempt(sessionId: string): { attemptId: string; leaseGeneration: number; taskId: string; workerIncarnationId: string } | undefined {
+    const rows = this.database.sqlite.prepare(`select id, attempt_id, lease_generation, owner_worker_incarnation_id
+      from coordinator_tasks where owner_session_id = ? and state = 'claimed'
+        and attempt_id is not null and owner_worker_incarnation_id is not null
+        and julianday(lease_expires_at) > julianday('now') order by id`).all(sessionId) as Array<{
+          id: string; attempt_id: string; lease_generation: number; owner_worker_incarnation_id: string;
+        }>;
+    if (rows.length > 1) throw new Error("Session has multiple active execution attempts.");
+    const row = rows[0];
+    return row ? { attemptId: row.attempt_id, leaseGeneration: row.lease_generation, taskId: row.id,
+      workerIncarnationId: row.owner_worker_incarnation_id } : undefined;
   }
 
   getSession(id: string): OrchestrationSession | undefined {
@@ -497,6 +538,8 @@ function sessionFromRow(row: SessionRow): OrchestrationSession {
   }
   return {
     id: row.id,
+    logicalSessionId: row.logical_session_id ?? "logical_" + row.id,
+    workerIncarnationId: row.worker_incarnation_id ?? `worker_${row.id}_${row.incarnation}`,
     projectKey: row.project_key,
     workspaceId: row.workspace_id ?? undefined,
     workspaceRoot: row.workspace_root,

@@ -77,6 +77,22 @@ export class OrchestrationRegistry {
     return session;
   }
 
+  /** Starts a new authoritative worker for one logical session and fences the old one. */
+  restartWorker(sessionId: string, now = new Date().toISOString()): OrchestrationSession {
+    const result = this.store.transaction(() => {
+      const current = this.get(sessionId);
+      const updated = this.store.advanceWorkerIncarnation(sessionId, current.revision ?? 1, now);
+      this.store.appendEvent({ sessionId, kind: "worker_incarnation_started", detail: {
+        logicalSessionId: updated.logicalSessionId,
+        workerIncarnationId: updated.workerIncarnationId,
+        incarnation: updated.incarnation,
+      }, createdAt: now });
+      return updated;
+    });
+    this.changed(result.projectKey);
+    return result;
+  }
+
   /** Called only by the lease-fenced worktree provisioner; does not imply activity or liveness. */
   bindWorkspace(sessionId: string, projectKey: string, workspaceId: string, workspaceRoot: string): void {
     if (this.get(sessionId).projectKey !== projectKey) throw new Error("Session outside project scope.");
@@ -239,8 +255,14 @@ export class OrchestrationRegistry {
     const result = this.store.transaction(() => {
       const current = this.get(sessionId);
       const now = input.now ?? new Date().toISOString();
+      const activeAttempt = this.store.currentExecutionAttempt(sessionId);
+      if (activeAttempt && activeAttempt.workerIncarnationId !== current.workerIncarnationId) {
+        throw new Error("Current execution attempt belongs to an older worker incarnation.");
+      }
       const run = this.store.createTestRun({
-        attemptId: "attempt_" + randomUUID().replaceAll("-", "").slice(0, 20),
+        attemptId: activeAttempt?.attemptId ?? "attempt_" + randomUUID().replaceAll("-", "").slice(0, 20),
+        executionTaskId: activeAttempt?.taskId,
+        leaseGeneration: activeAttempt?.leaseGeneration,
         projectKey: current.projectKey,
         sessionId,
         kind: input.kind,
@@ -312,9 +334,14 @@ export class OrchestrationRegistry {
       if (!run) throw new Error("Unknown TestRun process session.");
       const current = this.get(sessionId);
       const completedAt = input.completedAt ?? new Date().toISOString();
+      const activeAttempt = this.store.currentExecutionAttempt(sessionId);
       const authorityStable = (current.incarnation ?? 1) === run.workerIncarnation
         && (current.bindingGeneration ?? 1) === run.bindingGeneration
-        && (current.fileGeneration ?? 0) === run.fileGeneration;
+        && (current.fileGeneration ?? 0) === run.fileGeneration
+        && (!run.executionTaskId || (activeAttempt?.taskId === run.executionTaskId
+          && activeAttempt.attemptId === run.attemptId
+          && activeAttempt.leaseGeneration === run.leaseGeneration
+          && activeAttempt.workerIncarnationId === current.workerIncarnationId));
       let status: OrchestrationTestRun["status"];
       let reason = input.reason;
       if (input.cancelled) { status = "cancelled"; reason ??= "cancelled"; }
@@ -329,6 +356,7 @@ export class OrchestrationRegistry {
       let evidence: OrchestrationExecutionEvidence | undefined;
       if (status === "passed" && run.testedCommit && run.testedTree) {
         evidence = this.store.insertEvidence({ testRunId: run.testRunId, attemptId: run.attemptId,
+          executionTaskId: run.executionTaskId, leaseGeneration: run.leaseGeneration,
           projectKey: run.projectKey, sessionId: run.sessionId, testedCommit: run.testedCommit,
           testedTree: run.testedTree, checkDefinition: run.checkDefinition,
           environmentIdentity: run.environmentIdentity, exitStatus: 0, startedAt: run.startedAt,

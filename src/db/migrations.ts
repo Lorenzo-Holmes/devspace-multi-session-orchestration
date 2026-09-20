@@ -329,6 +329,30 @@ const migrations: Migration[] = [
         on orchestration_execution_evidence(project_key, session_id, created_at desc);
     `),
   },
+  {
+    version: 22, name: "logical-session-and-execution-attempt-fencing",
+    up: sqlite => sqlite.exec(`
+      alter table orchestration_sessions add column logical_session_id text;
+      alter table orchestration_sessions add column worker_incarnation_id text;
+      update orchestration_sessions
+        set logical_session_id = 'logical_' || id,
+            worker_incarnation_id = 'worker_' || id || '_' || incarnation
+        where logical_session_id is null or worker_incarnation_id is null;
+      create unique index orchestration_sessions_logical on orchestration_sessions(logical_session_id);
+
+      alter table coordinator_tasks add column attempt_id text;
+      alter table coordinator_tasks add column lease_generation integer not null default 0;
+      alter table coordinator_tasks add column owner_worker_incarnation_id text;
+      update coordinator_tasks
+        set attempt_id = 'legacy_attempt_' || id || '_' || revision,
+            owner_worker_incarnation_id = (
+              select worker_incarnation_id from orchestration_sessions s where s.id = coordinator_tasks.owner_session_id
+            ),
+            lease_generation = 1
+        where state = 'claimed' and attempt_id is null;
+      create unique index coordinator_tasks_attempt on coordinator_tasks(attempt_id) where attempt_id is not null;
+    `),
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {

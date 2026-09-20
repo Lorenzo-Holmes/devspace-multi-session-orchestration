@@ -15,7 +15,14 @@ test("version 18 session DB upgrades atomically, survives an injected migration 
   first.close();
   // Reconstruct the exact pre-19 session columns in an isolated fixture DB.
   const legacy = new Database(databasePath(dir));
-  legacy.exec(`drop table orchestration_execution_evidence;
+  legacy.exec(`drop index coordinator_tasks_attempt;
+    alter table coordinator_tasks drop column attempt_id;
+    alter table coordinator_tasks drop column lease_generation;
+    alter table coordinator_tasks drop column owner_worker_incarnation_id;
+    drop index orchestration_sessions_logical;
+    alter table orchestration_sessions drop column logical_session_id;
+    alter table orchestration_sessions drop column worker_incarnation_id;
+    drop table orchestration_execution_evidence;
     drop table orchestration_test_runs;
     alter table orchestration_sessions drop column last_test_attempt_at;
     alter table orchestration_sessions drop column last_successful_validation_at;
@@ -50,11 +57,14 @@ test("version 18 session DB upgrades atomically, survives an injected migration 
   const upgraded = new OrchestrationStore(dir);
   assert.equal(upgraded.getSession("legacy")?.projectKey, original.projectKey);
   assert.equal(upgraded.getSession("legacy")?.revision, 1);
+  assert.ok(upgraded.getSession("legacy")?.logicalSessionId);
+  assert.ok(upgraded.getSession("legacy")?.workerIncarnationId);
   upgraded.close();
   const restarted = openDatabase(dir);
   assert.equal((restarted.sqlite.prepare("select count(*) as n from devspace_schema_migrations where version = 19").get() as { n: number }).n, 1);
   assert.equal((restarted.sqlite.prepare("select count(*) as n from devspace_schema_migrations where version = 20").get() as { n: number }).n, 1);
   assert.equal((restarted.sqlite.prepare("select count(*) as n from devspace_schema_migrations where version = 21").get() as { n: number }).n, 1);
+  assert.equal((restarted.sqlite.prepare("select count(*) as n from devspace_schema_migrations where version = 22").get() as { n: number }).n, 1);
   assert.equal((restarted.sqlite.prepare("select count(*) as n from sqlite_master where type = 'table' and name = 'orchestration_test_runs'").get() as { n: number }).n, 1);
   assert.equal((restarted.sqlite.prepare("select count(*) as n from sqlite_master where type = 'table' and name = 'orchestration_execution_evidence'").get() as { n: number }).n, 1);
   restarted.close();

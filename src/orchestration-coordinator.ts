@@ -120,6 +120,8 @@ export class OrchestrationCoordinator {
       ownerSessionId: session.id,
       leaseToken: randomUUID(),
       leaseExpiresAt: new Date(now.getTime() + leaseMs).toISOString(),
+      attemptId: "attempt_" + randomUUID().replaceAll("-", "").slice(0, 20),
+      ownerWorkerIncarnationId: session.workerIncarnationId ?? `worker_${session.id}_${session.incarnation ?? 1}`,
       now: now.toISOString(),
     }));
   }
@@ -131,6 +133,11 @@ export class OrchestrationCoordinator {
     expectedRevision: number;
     now?: Date;
   }): CoordinatorTask {
+    const task = this.get(input.taskId), session = this.sessions.get(input.sessionId);
+    if (!task.attemptId || !task.ownerWorkerIncarnationId
+      || task.ownerWorkerIncarnationId !== session.workerIncarnationId) {
+      throw new Error("Coordinator execution attempt is no longer owned by the current worker incarnation.");
+    }
     return this.changed(this.store.releaseClaim({
       taskId: input.taskId,
       expectedRevision: input.expectedRevision,
@@ -148,6 +155,11 @@ export class OrchestrationCoordinator {
     now?: Date;
   }): CoordinatorTask {
     const task = this.get(input.taskId);
+    const session = this.sessions.get(input.sessionId);
+    if (!task.attemptId || !task.ownerWorkerIncarnationId
+      || task.ownerWorkerIncarnationId !== session.workerIncarnationId) {
+      throw new Error("Coordinator execution attempt is no longer owned by the current worker incarnation.");
+    }
     if (task.leaseExpiresAt && Date.parse(task.leaseExpiresAt) <= (input.now ?? new Date()).getTime()) {
       throw new Error("Coordinator task lease has expired.");
     }

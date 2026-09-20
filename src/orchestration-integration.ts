@@ -87,7 +87,10 @@ export class IntegrationManager {
       const task = this.coordinator.get(current.taskId), session = this.sessions.get(current.sessionId);
       const binding = this.bindings.get(project, current.taskId);
       if (task.projectKey !== project || session.projectKey !== project || !binding
-        || binding.sessionId !== session.id || !binding.workspaceId || !binding.worktreeRoot) {
+        || binding.sessionId !== session.id || !binding.workspaceId || !binding.worktreeRoot
+        || !task.attemptId || binding.attemptId !== task.attemptId
+        || binding.leaseGeneration !== task.leaseGeneration
+        || binding.workerIncarnationId !== session.workerIncarnationId) {
         throw new Error("Integration requires a current binding in project scope.");
       }
       const record = this.store.update<IntegrationRecord>("integration_records", { ...current, binding,
@@ -119,11 +122,17 @@ export class IntegrationManager {
         && JSON.stringify(currentBinding) === JSON.stringify(binding);
       const observation = probe.observation, candidateCommit = observation?.candidateOid;
       const clean = observation?.candidateStatus === "";
-      const currentBindingValid = currentBinding?.status === "active" && currentBinding.workspaceId === session.workspaceId;
+      const currentBindingValid = currentBinding?.status === "active" && currentBinding.workspaceId === session.workspaceId
+        && currentBinding.operationPhase === "binding_active" && currentBinding.attemptId === task.attemptId
+        && currentBinding.leaseGeneration === task.leaseGeneration
+        && currentBinding.workerIncarnationId === session.workerIncarnationId;
       const evidence = (record.evidenceIds ?? []).map(evidenceId => this.sessions.evidence(project, session.id, evidenceId));
       const tests = evidence.length > 0 && evidence.every(value => value?.trustLevel === "execution_observed"
         && value.testedCommit === candidateCommit
         && value.testedTree === observation?.candidateTree
+        && value.executionTaskId === task.id
+        && value.attemptId === task.attemptId
+        && value.leaseGeneration === task.leaseGeneration
         && value.workerIncarnation === (session.incarnation ?? 1)
         && value.bindingGeneration === (session.bindingGeneration ?? 1)
         && value.fileGeneration === (session.fileGeneration ?? 0));
