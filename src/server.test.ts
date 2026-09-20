@@ -898,6 +898,14 @@ test("Computer Use exposes native desktop and trusted browser Codex CUA tools wh
   });
   const tools = await context.client.listTools();
   const names = tools.tools.map((tool) => tool.name);
+  if (process.platform !== "win32") {
+    // Production only constructs/registers Codex CUA on Windows. Non-Windows
+    // hosts must fail closed instead of advertising unusable desktop/browser tools.
+    for (const name of ["observe", "computer", "browser_state", "browser_observe", "browser_action"]) {
+      assert.equal(names.includes(name), false);
+    }
+    return;
+  }
   assert.ok(names.includes("observe"));
   assert.ok(names.includes("computer"));
   assert.ok(names.includes("browser_state"));
@@ -949,6 +957,12 @@ test("browser_state forwards real ChatGPT MCP scope as Codex Browser Use turn me
     computerUseEnabled: true,
     codexCua: bridge,
   });
+  if (process.platform !== "win32") {
+    const names = (await context.client.listTools()).tools.map((tool) => tool.name);
+    assert.equal(names.includes("browser_state"), false);
+    assert.equal(observedMetadata.length, 0);
+    return;
+  }
   const opened = structuredContent(await callOpen(context.client, context.project, "browser-chat-session"));
   const result = await context.client.callTool({
     name: "browser_state",
