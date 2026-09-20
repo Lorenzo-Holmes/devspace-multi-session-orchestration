@@ -52,6 +52,7 @@ import {
 import { expandHomePath } from "./roots.js";
 import { readReviewRef } from "./review-checkpoints.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
+import { formatDoctorReport, parseDoctorArgs, runRuntimeDoctor, writeDoctorSupportBundle } from "./runtime-doctor.js";
 
 type Command =
   | "serve"
@@ -80,7 +81,7 @@ async function main(argv: string[]): Promise<void> {
       await runInit({ force: args.includes("--force") });
       return;
     case "doctor":
-      await runDoctor();
+      await runDoctor(args);
       return;
     case "config":
       runConfigCommand(args);
@@ -340,32 +341,14 @@ async function serve(): Promise<void> {
   process.once("SIGTERM", handleShutdown);
 }
 
-async function runDoctor(): Promise<void> {
-  const files = loadDevspaceFiles();
-  console.log(`Config dir: ${files.dir}`);
-  console.log(`Config file: ${files.configExists ? files.configPath : "missing"}`);
-  console.log(`Auth file: ${files.authExists ? files.authPath : "missing"}`);
-  console.log(`Node: ${process.version} (${nodeVersionStatus()})`);
-  console.log(`Node ABI: ${process.versions.modules}`);
-  console.log(`Platform: ${process.platform} ${process.arch}`);
-  console.log(`Git: ${checkGitAvailable()}`);
-  console.log(`Bash shell: ${checkBashShell()}`);
-  console.log(`SQLite native dependency: ${checkSqliteNative()}`);
-
-  try {
-    const config = loadConfig();
-    console.log(`Local MCP URL: http://${config.host}:${config.port}/mcp`);
-    console.log(`Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`);
-    console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
-    console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
-    const providers = buildLocalAgentProviderStatuses(
-      config.subagents,
-      getLocalAgentProviderAvailabilitySnapshot(),
-    );
-    console.log(`Subagents: ${config.subagents.enabled ? "enabled" : "disabled"}`);
-    console.log(`Subagent providers: ${formatLocalAgentProviderStatusSummary(providers)}`);
-  } catch (error) {
-    console.log(`Config status: ${error instanceof Error ? error.message : String(error)}`);
+async function runDoctor(args: string[]): Promise<void> {
+  const parsed = parseDoctorArgs(args);
+  const report = await runRuntimeDoctor(parsed.options);
+  const bundlePath = parsed.supportBundle ? await writeDoctorSupportBundle(report) : undefined;
+  if (parsed.json) console.log(JSON.stringify({ ...report, supportBundle: bundlePath }));
+  else {
+    console.log(formatDoctorReport(report));
+    if (bundlePath) console.log(`\nSupport bundle: ${bundlePath}`);
   }
 }
 
@@ -406,7 +389,7 @@ function printHelp(): void {
       "  devspace                 Run first-time setup if needed, then start the server",
       "  devspace serve           Start the server",
       "  devspace init            Create or update ~/.devspace/config.jsonc and auth.json",
-      "  devspace doctor          Show config, runtime, and native dependency status",
+      "  devspace doctor [--full] [--json] [--category <name>] [--support-bundle]",
       "  devspace config get      Print persisted config",
       "  devspace config set publicBaseUrl <url|null>",
       "  devspace show-changes <review-ref> [--json]",
