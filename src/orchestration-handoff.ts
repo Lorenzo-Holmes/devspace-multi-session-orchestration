@@ -41,9 +41,10 @@ export class HandoffManager {
       if (task.projectKey !== project || (task.ownerSessionId !== input.fromSessionId && binding?.sessionId !== input.fromSessionId)) {
         throw new Error("Handoff task is not owned by sender in current project scope.");
       }
-      if (!task.attemptId || !binding || binding.attemptId !== task.attemptId || binding.leaseGeneration !== task.leaseGeneration
-        || binding.workerIncarnationId !== sender.workerIncarnationId
-        || (task.ownerWorkerIncarnationId && task.ownerWorkerIncarnationId !== sender.workerIncarnationId)) {
+      if (!task.attemptId || task.ownerSessionId !== input.fromSessionId
+        || !task.ownerWorkerIncarnationId || task.ownerWorkerIncarnationId !== sender.workerIncarnationId
+        || (binding && (binding.attemptId !== task.attemptId || binding.leaseGeneration !== task.leaseGeneration
+          || binding.workerIncarnationId !== sender.workerIncarnationId))) {
         throw new Error("Handoff execution authority is stale.");
       }
       authority = { executionAttemptId: task.attemptId, leaseGeneration: task.leaseGeneration };

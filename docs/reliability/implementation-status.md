@@ -53,7 +53,7 @@ for Node ABI **137**. Validation below is for the current isolated hardening wor
 | `pnpm typecheck` | PASS |
 | `git diff --check` | PASS |
 | Full repository `pnpm test` at remote `2ddb6d9` | PASS: 361 total, 348 passed, 0 failed, 13 skipped. The 13 skips remain **SKIP**, not PASS. |
-| Post-`2ddb6d9` A10/A11/A13/A14 focused delta | PASS: logical/worker/attempt fencing, crash-shaped worktree recovery, migration 22 and filesystem containment suites; no skips in these focused runs. Full rerun for this delta is pending. |
+| Full repository `pnpm test` after A10/A11/A13/A14 delta | PASS: **369 total, 356 passed, 0 failed, 13 skipped**. A first run exposed one over-strict handoff prerequisite (claimed task without a worktree); it was corrected and the full suite then passed. The 13 skips remain **SKIP**, not PASS. |
 | `pnpm build` | PASS; Vite reports existing large-chunk warnings. |
 | Real Browser/ChatGPT rollover | NOT RUN; A14 handle-race certification and A16 adversarial acceptance still block unattended takeover |
 
