@@ -74,8 +74,9 @@ test("heartbeat and events update durable activity signals without changing sess
     now: "2026-09-19T02:05:00.000Z",
     detail: { passed: true },
   }).session;
-  assert.equal(tested.lastTestAt, "2026-09-19T02:05:00.000Z");
-  assert.equal(tested.consecutiveErrorCount, 0);
+  assert.equal(tested.lastTestAttemptAt, "2026-09-19T02:05:00.000Z");
+  assert.equal(tested.lastTestAt, undefined, "caller-declared test success is not trusted validation");
+  assert.equal(tested.consecutiveErrorCount, 2, "untrusted test events cannot clear durable failures");
   assert.equal(registry.events(session.id, 10).length, 5);
   registry.close();
 });

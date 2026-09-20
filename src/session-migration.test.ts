@@ -15,7 +15,15 @@ test("version 18 session DB upgrades atomically, survives an injected migration 
   first.close();
   // Reconstruct the exact pre-19 session columns in an isolated fixture DB.
   const legacy = new Database(databasePath(dir));
-  legacy.exec(`drop table workspace_access_config_serialization;
+  legacy.exec(`drop table orchestration_execution_evidence;
+    drop table orchestration_test_runs;
+    alter table orchestration_sessions drop column last_test_attempt_at;
+    alter table orchestration_sessions drop column last_successful_validation_at;
+    alter table orchestration_sessions drop column last_validation_failure_at;
+    alter table orchestration_sessions drop column last_validated_commit;
+    alter table orchestration_sessions drop column last_validated_tree;
+    alter table orchestration_sessions drop column last_validated_file_generation;
+    drop table workspace_access_config_serialization;
     drop table workspace_access_managed_roots;
     drop table workspace_access_operations;
     drop index workspace_access_grant_operation;
@@ -46,5 +54,8 @@ test("version 18 session DB upgrades atomically, survives an injected migration 
   const restarted = openDatabase(dir);
   assert.equal((restarted.sqlite.prepare("select count(*) as n from devspace_schema_migrations where version = 19").get() as { n: number }).n, 1);
   assert.equal((restarted.sqlite.prepare("select count(*) as n from devspace_schema_migrations where version = 20").get() as { n: number }).n, 1);
+  assert.equal((restarted.sqlite.prepare("select count(*) as n from devspace_schema_migrations where version = 21").get() as { n: number }).n, 1);
+  assert.equal((restarted.sqlite.prepare("select count(*) as n from sqlite_master where type = 'table' and name = 'orchestration_test_runs'").get() as { n: number }).n, 1);
+  assert.equal((restarted.sqlite.prepare("select count(*) as n from sqlite_master where type = 'table' and name = 'orchestration_execution_evidence'").get() as { n: number }).n, 1);
   restarted.close();
 });

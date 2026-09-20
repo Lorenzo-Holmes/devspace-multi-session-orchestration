@@ -11,9 +11,9 @@ const refSchema = z.string().min(1).max(200).refine(s => !s.startsWith("-") && !
 export const integrationUpdateSchema = z.object({
   candidateRef: refSchema.optional(),
   targetRef: refSchema.optional(),
-  testEvidence: z.array(z.object({ eventId: z.number().int().positive(), commit: z.string().regex(/^[a-f0-9]{40,64}$/) })).max(50).optional(),
+  evidenceIds: z.array(z.string().regex(/^evid_[a-f0-9]{20}$/)).max(50).optional(),
   reviewState: z.enum(["pending", "in_review", "approved", "changes_requested"]).optional(),
-});
+}).strict();
 type IntegrationUpdate = z.infer<typeof integrationUpdateSchema>;
 export interface IntegrationRecord extends DurableRecord {
   integrationId: string; taskId: string; sessionId: string; binding: WorktreeBinding;
@@ -23,7 +23,9 @@ export interface IntegrationRecord extends DurableRecord {
   evaluationState?: "unchecked" | "running" | "checked" | "stale";
   probeError?: string;
   conflictState: "unknown" | "clean" | "conflict";
-  testEvidence: Array<{ eventId: number; commit: string }>;
+  evidenceIds: string[];
+  /** Read-only legacy payload from records created before trusted evidence. Never authoritative. */
+  testEvidence?: Array<{ eventId: number; commit: string }>;
   integrationWorktreeState: "unchecked" | "clean" | "dirty" | "missing";
   reviewState: "pending" | "in_review" | "approved" | "changes_requested";
   reviewedCommit?: string;
@@ -49,22 +51,30 @@ export class IntegrationManager {
     return this.store.insert("integration_records", {
       id, integrationId: id, projectKey: project, taskId, sessionId, binding, candidateRef, targetRef,
       evaluationGeneration: 0, evaluationState: "unchecked", policyRevision: MERGE_POLICY, mergeStrategy: "ort",
-      diffReady: false, conflictState: "unknown", testEvidence: [], integrationWorktreeState: "unchecked",
+      diffReady: false, conflictState: "unknown", evidenceIds: [], integrationWorktreeState: "unchecked",
       reviewState: "pending", mergeReady: false, readyReview: false, gates: {}, revision: 1, createdAt: now, updatedAt: now,
     });
   }
   update(project: string, id: string, expectedRevision: number, input: IntegrationUpdate): IntegrationRecord {
     const patch = integrationUpdateSchema.parse(input), record = this.get(project, id);
-    const evidence = patch.testEvidence ?? record.testEvidence;
+    const evidenceIds = patch.evidenceIds ?? record.evidenceIds ?? [];
+    const evidence = evidenceIds.map(evidenceId => this.sessions.evidence(project, record.sessionId, evidenceId));
+    if (evidence.some(value => !value || value.trustLevel !== "execution_observed")) {
+      throw new Error("Integration accepts only scoped execution-issued evidence IDs.");
+    }
+    const evidenceCommits = new Set(evidence.flatMap(value => value ? [value.testedCommit] : []));
     const refsChanged = (patch.candidateRef !== undefined && patch.candidateRef !== record.candidateRef)
       || (patch.targetRef !== undefined && patch.targetRef !== (record.targetRef ?? "HEAD"));
-    const reviewedCommit = patch.reviewState === "approved" ? evidence[0]?.commit : refsChanged ? undefined : record.reviewedCommit;
-    if (patch.reviewState === "approved" && (!reviewedCommit || evidence.some(e => e.commit !== reviewedCommit))) {
-      throw new Error("Review approval requires evidence for one explicit candidate commit.");
+    const evidenceChanged = JSON.stringify(evidenceIds) !== JSON.stringify(record.evidenceIds ?? []);
+    const reviewedCommit = patch.reviewState === "approved"
+      ? (evidenceCommits.size === 1 ? [...evidenceCommits][0] : undefined)
+      : refsChanged || evidenceChanged ? undefined : record.reviewedCommit;
+    if (patch.reviewState === "approved" && (!reviewedCommit || evidenceIds.length === 0)) {
+      throw new Error("Review approval requires trusted evidence for one explicit candidate commit.");
     }
     // Any evidence/ref/review edit invalidates the previous gate snapshot.
-    return this.store.update("integration_records", { ...record, ...patch, reviewedCommit, mergeReady: false, readyReview: false,
-      reviewState: refsChanged && patch.reviewState !== "approved" ? "pending" : patch.reviewState ?? record.reviewState,
+    return this.store.update("integration_records", { ...record, ...patch, evidenceIds, reviewedCommit, mergeReady: false, readyReview: false,
+      reviewState: (refsChanged || evidenceChanged) && patch.reviewState !== "approved" ? "pending" : patch.reviewState ?? record.reviewState,
       evaluationGeneration: (record.evaluationGeneration ?? 0) + 1, evaluationState: "unchecked",
       gates: {}, checkedAt: undefined, updatedAt: new Date().toISOString() }, expectedRevision);
   }
@@ -110,14 +120,13 @@ export class IntegrationManager {
       const observation = probe.observation, candidateCommit = observation?.candidateOid;
       const clean = observation?.candidateStatus === "";
       const currentBindingValid = currentBinding?.status === "active" && currentBinding.workspaceId === session.workspaceId;
-      // Legacy event evidence is retained for compatibility here, not promoted
-      // into execution-issued evidence. The A1/A2 trust boundary remains separate.
-      const latestTest = this.sessions.latestEvent(session.id, "test_run");
-      const tests = record.testEvidence.length > 0 && record.testEvidence.every(evidence => {
-        const event = this.sessions.event(session.id, evidence.eventId);
-        return evidence.commit === candidateCommit && event?.kind === "test_run" && event.detail.passed === true
-          && (!session.lastFileChangeAt || event.createdAt >= session.lastFileChangeAt);
-      }) && latestTest?.detail.passed === true;
+      const evidence = (record.evidenceIds ?? []).map(evidenceId => this.sessions.evidence(project, session.id, evidenceId));
+      const tests = evidence.length > 0 && evidence.every(value => value?.trustLevel === "execution_observed"
+        && value.testedCommit === candidateCommit
+        && value.testedTree === observation?.candidateTree
+        && value.workerIncarnation === (session.incarnation ?? 1)
+        && value.bindingGeneration === (session.bindingGeneration ?? 1)
+        && value.fileGeneration === (session.fileGeneration ?? 0));
       const scopedSessions = this.sessions.all(project);
       const ids = new Set(scopedSessions.map(s => s.id));
       const conflicts = detectOrchestrationConflicts(scopedSessions,

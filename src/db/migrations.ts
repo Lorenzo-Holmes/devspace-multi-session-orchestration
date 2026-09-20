@@ -294,6 +294,41 @@ const migrations: Migration[] = [
       insert into workspace_access_config_serialization(singleton, operation_id) values (1, null);
     `),
   },
+  {
+    version: 21, name: "trusted-validation-evidence",
+    up: sqlite => sqlite.exec(`
+      alter table orchestration_sessions add column last_test_attempt_at text;
+      alter table orchestration_sessions add column last_successful_validation_at text;
+      alter table orchestration_sessions add column last_validation_failure_at text;
+      alter table orchestration_sessions add column last_validated_commit text;
+      alter table orchestration_sessions add column last_validated_tree text;
+      alter table orchestration_sessions add column last_validated_file_generation integer;
+      create table orchestration_test_runs (
+        id text primary key,
+        project_key text not null,
+        session_id text not null references orchestration_sessions(id) on delete cascade,
+        process_session_id text,
+        revision integer not null default 1,
+        status text not null check(status in ('started','running','passed','failed','cancelled','unknown')),
+        data_json text not null,
+        started_at text not null,
+        completed_at text
+      );
+      create unique index orchestration_test_runs_process on orchestration_test_runs(process_session_id)
+        where process_session_id is not null;
+      create index orchestration_test_runs_session on orchestration_test_runs(session_id, started_at desc, id);
+      create table orchestration_execution_evidence (
+        id text primary key,
+        project_key text not null,
+        session_id text not null references orchestration_sessions(id) on delete cascade,
+        test_run_id text not null unique references orchestration_test_runs(id) on delete cascade,
+        data_json text not null,
+        created_at text not null
+      );
+      create index orchestration_execution_evidence_scope
+        on orchestration_execution_evidence(project_key, session_id, created_at desc);
+    `),
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {

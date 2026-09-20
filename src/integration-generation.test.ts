@@ -3,13 +3,28 @@ import { writeFile, rename, unlink, readFile, access } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { IntegrationManager } from "./orchestration-integration.js";
-import { probeCandidateMerge, mergeInputsUnchanged, type MergeProbeInput } from "./integration-merge-probe.js";
+import { probeCandidateMerge, mergeInputsUnchanged, observeValidationTree, type MergeProbeInput } from "./integration-merge-probe.js";
 import { v2Fixture, exec } from "./test-support/orchestration-v2.js";
 
 async function commit(cwd: string): Promise<string> {
   await exec("git", ["add", "--all"], { cwd });
   await exec("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "change"], { cwd });
   return (await exec("git", ["rev-parse", "HEAD"], { cwd })).stdout.trim();
+}
+
+async function trustedEvidence(f: Awaited<ReturnType<typeof v2Fixture>>, cwd: string) {
+  const source = await observeValidationTree(cwd);
+  const run = f.sessions.beginTestRun(f.session.id, {
+    kind: "test", checkDefinition: "test:fixture", requiresTestCount: false,
+    command: "fixture-test", workingDirectory: cwd, testedCommit: source.commit,
+    testedTree: source.tree, environmentIdentity: "fixture", issuer: "fixture",
+  });
+  const processSessionId = "fixture:" + run.testRunId;
+  f.sessions.bindTestRunProcess(f.session.id, run.testRunId, processSessionId);
+  const completed = f.sessions.finishTestRun(f.session.id, processSessionId,
+    { exitCode: 0, sourceStable: true, positiveReceipt: true });
+  assert.ok(completed.evidence);
+  return completed.evidence!;
 }
 
 for (const scenario of ["same-line", "rename-delete", "delete-modify", "binary", "clean"] as const) {
@@ -92,22 +107,42 @@ for (const mutation of ["task", "session", "binding", "target", "candidate", "re
   });
 }
 
-test("integration obtains evidence by scoped ID beyond the display history prefix", async t => {
+test("integration obtains trusted evidence by scoped ID beyond the event display prefix", async t => {
   const f = await v2Fixture(t), binding = await f.v2.bindings.provision(f.workspace, f.lease);
   await writeFile(join(binding.worktreeRoot!, "same.txt"), "candidate\n");
   const candidate = await commit(binding.worktreeRoot!);
-  const event = f.sessions.recordEvent({ sessionId: f.session.id, kind: "test_run", detail: { passed: true } }).event;
+  const evidence = await trustedEvidence(f, binding.worktreeRoot!);
+  const event = f.sessions.latestEvent(f.session.id, "test_run")!;
   for (let i = 0; i < 501; i++) f.sessions.heartbeat(f.session.id);
   assert.equal(f.sessions.events(f.session.id, 500).some(item => item.id === event.id), false);
   assert.equal(f.sessions.event(f.session.id, event.id)?.id, event.id);
   const other = f.sessions.register({ projectKey: "other", workspaceRoot: f.project, state: "running" });
-  assert.equal(f.sessions.event(other.id, event.id), undefined);
+  assert.equal(f.sessions.evidence("other", other.id, evidence.evidenceId), undefined);
   f.coordinator.complete(f.lease);
   let record = f.v2.integrations.create(f.projectKey, f.task.id, f.session.id);
-  record = f.v2.integrations.update(f.projectKey, record.id, record.revision, { testEvidence: [{ eventId: event.id, commit: candidate }], reviewState: "approved" });
+  record = f.v2.integrations.update(f.projectKey, record.id, record.revision,
+    { evidenceIds: [evidence.evidenceId], reviewState: "approved" });
   record = await f.v2.integrations.gate(f.projectKey, record.id, record.revision);
   assert.equal(record.gates.testEvidence, true);
   assert.equal(record.mergeReady, true);
+  assert.equal(evidence.testedCommit, candidate);
+});
+
+test("evidence for commit A cannot validate later candidate B", async t => {
+  const f = await v2Fixture(t), binding = await f.v2.bindings.provision(f.workspace, f.lease);
+  const cwd = binding.worktreeRoot!;
+  await writeFile(join(cwd, "same.txt"), "candidate-a\n");
+  await commit(cwd);
+  const evidence = await trustedEvidence(f, cwd);
+  await writeFile(join(cwd, "same.txt"), "candidate-b\n");
+  await commit(cwd);
+  f.coordinator.complete(f.lease);
+  let record = f.v2.integrations.create(f.projectKey, f.task.id, f.session.id);
+  record = f.v2.integrations.update(f.projectKey, record.id, record.revision,
+    { evidenceIds: [evidence.evidenceId], reviewState: "approved" });
+  record = await f.v2.integrations.gate(f.projectKey, record.id, record.revision);
+  assert.equal(record.gates.testEvidence, false);
+  assert.equal(record.mergeReady, false);
 });
 
 test("custom merge commands are not executed by the isolated simulation", async t => {

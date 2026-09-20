@@ -1,7 +1,8 @@
 # Integration generation and isolated merge observations
 
-Status: implementation checkpoint; first focused run found and corrected a
-restart serialization mismatch. Post-correction validation is pending.
+Status: implementation checkpoint. Focused integration, TestRun, migration and
+server-telemetry regressions pass; full repository validation is required before
+this checkpoint can be called merge-ready.
 
 An evaluation first commits a new generation with both readiness flags false.
 It captures the current task, session and workspace binding, rather than using
@@ -40,28 +41,31 @@ last observation. `checkedAt`, the OID pair and generation identify a historical
 observation, **not perpetual merge permission**. No merge executor is added.
 
 The integration's internal session and conflict reads are complete rather than
-limited to UI history pages. Evidence events use a session-scoped exact-ID query
-and a kind-filtered latest-event query. These changes fix prefix starvation, not
-the separate A1/A2 trust defect: legacy caller-supplied event/commit associations
-are still present. They must not be described as trusted execution evidence.
-Logical-worker/attempt fencing and handle-level filesystem containment remain
-separate prerequisites. Automatic conversation rollover must stay disabled.
+limited to UI history pages. Integration updates now accept only scoped
+execution-issued Evidence IDs. Each accepted Evidence binds the validated commit
+and tree plus the worker incarnation, binding generation and file generation;
+legacy caller-supplied event/commit associations are read-only compatibility data
+and are not authoritative. A candidate advance after validation therefore fails
+the evidence gate even if a caller reuses the older Evidence ID.
+
+The TestRun journal separates `started`, `running`, `passed`, `failed`,
+`cancelled` and `unknown`. `exec_command` records process identity and hard-timeout
+facts; `write_stdin` completes the same run. Exit zero is insufficient by itself:
+the source observation and execution authority must still match, and Node test
+runs require a positive non-zero test receipt. Help output and keyword-only
+commands do not create successful validation facts. Session health separately
+tracks attempts, successful validation, failures and the validated file
+generation, so a failed test cannot clear `unverified_changes`.
+
+Logical-session/attempt ownership beyond these generation fences and handle-level
+filesystem containment remain separate prerequisites. Automatic conversation
+rollover must stay disabled until those prerequisites are closed.
 
 Regression source: `src/integration-generation.test.ts`. It includes real Git
 same-line, rename/delete, delete/modify, binary and clean merges; untouched index
-and ref checks; task/session/binding/target/candidate/review barriers; event lookup
-past 501 later observations; and conservative custom-driver rejection. Barrier
-tests are not real process-kill or browser E2E acceptance.
-
-## A1/A2 tool block during the current continuation
-
-`DevSpace_Local（固定域名）.apply_patch` rejected the proposed validation-journal
-patch with: `因 OpenAI 无法确定请求的安全状态，已拦截此工具调用。`
-The proposed migration and journal were not written. Earlier uncommitted
-observer scaffolding was removed; `src/process-sessions.ts` and
-`src/db/migrations.ts` were verified unchanged from the remote base. The blocked
-action was not retried using another tool, path, encoding or shell route.
-
-This is a tooling block, not a passing implementation or a new permission grant.
-A1/A2 remain unimplemented, A remains PARTIAL, and E cannot be declared ready.
-Independent UI, diagnostics and acceptance/security inventory work may continue.
+and ref checks; task/session/binding/target/candidate/review barriers; trusted
+Evidence lookup past bounded event history; stale commit rejection; and
+conservative custom-driver/filter rejection. `orchestration-validation.test.ts`,
+`process-sessions.test.ts`, `session-migration.test.ts` and the server telemetry
+regression cover the TestRun/Evidence lifecycle. Focused barriers are not a
+substitute for real process-kill or browser E2E acceptance.

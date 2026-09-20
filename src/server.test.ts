@@ -248,7 +248,7 @@ test("orchestration tools register, heartbeat, monitor and detect conflicts with
 });
 
 test("automatic orchestration telemetry records trusted tool activity without explicit session calls", async (t) => {
-  const context = await fixture(t, { toolMode: "codex" });
+  const context = await fixture(t, { toolMode: "codex", git: true });
   const conversation = "auto-telemetry-conversation";
   const opened = structuredContent(await callOpen(
     context.client,
@@ -297,11 +297,46 @@ test("automatic orchestration telemetry records trusted tool activity without ex
   } as Parameters<Client["callTool"]>[0]);
   assert.notEqual(patched.isError, true);
 
-  const validation = await context.client.callTool({
+  const falsePositive = await context.client.callTool({
     name: "exec_command",
     arguments: {
       workspaceId,
       cmd: "node --test --help",
+      yieldTimeMs: 10000,
+      maxOutputTokens: 2000,
+    },
+    _meta: { "openai/session": conversation },
+  } as Parameters<Client["callTool"]>[0]);
+  assert.notEqual(falsePositive.isError, true);
+
+  const afterHelp = structuredContent(await context.client.callTool({
+    name: "session_events",
+    arguments: { workspaceId, sessionId, limit: 100 },
+  }));
+  assert.doesNotMatch(String(afterHelp.eventsJson), /test_run/);
+
+  const addedTest = await context.client.callTool({
+    name: "apply_patch",
+    arguments: {
+      workspaceId,
+      patch: [
+        "*** Begin Patch",
+        "*** Add File: auto-validation.test.mjs",
+        "+import test from 'node:test';",
+        "+import assert from 'node:assert/strict';",
+        "+test('real validation', () => assert.equal(2 + 3, 5));",
+        "*** End Patch",
+      ].join("\n"),
+    },
+    _meta: { "openai/session": conversation },
+  } as Parameters<Client["callTool"]>[0]);
+  assert.notEqual(addedTest.isError, true);
+
+  const validation = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspaceId,
+      cmd: "node --test auto-validation.test.mjs",
       yieldTimeMs: 10000,
       maxOutputTokens: 2000,
     },
@@ -332,6 +367,7 @@ test("automatic orchestration telemetry records trusted tool activity without ex
   assert.match(eventJson, /test_run/);
   assert.match(eventJson, /error/);
   assert.match(eventJson, /"passed":true/);
+  assert.match(eventJson, /"trustLevel":"execution_observed"/);
 
   const parsedStatus = JSON.parse(String(status.sessionJson)) as {
     lastHeartbeatAt?: string;

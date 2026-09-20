@@ -30,6 +30,12 @@ export interface OrchestrationSession {
   lastHeartbeatAt?: string;
   lastActivityAt: string;
   lastTestAt?: string;
+  lastTestAttemptAt?: string;
+  lastSuccessfulValidationAt?: string;
+  lastValidationFailureAt?: string;
+  lastValidatedCommit?: string;
+  lastValidatedTree?: string;
+  lastValidatedFileGeneration?: number;
   revision?: number;
   incarnation?: number;
   bindingGeneration?: number;
@@ -69,6 +75,12 @@ interface SessionRow {
   last_heartbeat_at: string | null;
   last_activity_at: string;
   last_test_at: string | null;
+  last_test_attempt_at: string | null;
+  last_successful_validation_at: string | null;
+  last_validation_failure_at: string | null;
+  last_validated_commit: string | null;
+  last_validated_tree: string | null;
+  last_validated_file_generation: number | null;
   revision: number;
   incarnation: number;
   binding_generation: number;
@@ -93,6 +105,57 @@ interface IntentRow {
   path: string;
   access: string;
   created_at: string;
+}
+
+export type OrchestrationTestRunStatus = "started" | "running" | "passed" | "failed" | "cancelled" | "unknown";
+export interface OrchestrationTestRun {
+  testRunId: string;
+  attemptId: string;
+  processSessionId?: string;
+  projectKey: string;
+  sessionId: string;
+  kind: "test" | "build" | "typecheck";
+  checkDefinition: string;
+  requiresTestCount: boolean;
+  command: string;
+  workingDirectory: string;
+  testedCommit?: string;
+  testedTree?: string;
+  environmentIdentity: string;
+  startedAt: string;
+  completedAt?: string;
+  exitCode?: number;
+  signal?: string;
+  status: OrchestrationTestRunStatus;
+  issuer: string;
+  trustLevel: "unverified" | "execution_observed";
+  sessionRevision: number;
+  workerIncarnation: number;
+  bindingGeneration: number;
+  fileGeneration: number;
+  revision: number;
+  reason?: string;
+  evidenceId?: string;
+}
+
+export interface OrchestrationExecutionEvidence {
+  evidenceId: string;
+  testRunId: string;
+  attemptId: string;
+  projectKey: string;
+  sessionId: string;
+  testedCommit: string;
+  testedTree: string;
+  checkDefinition: string;
+  environmentIdentity: string;
+  exitStatus: 0;
+  startedAt: string;
+  completedAt: string;
+  issuer: string;
+  trustLevel: "execution_observed";
+  workerIncarnation: number;
+  bindingGeneration: number;
+  fileGeneration: number;
 }
 
 export class OrchestrationStore {
@@ -228,12 +291,14 @@ export class OrchestrationStore {
     }
     const updated: OrchestrationSession = { ...current, ...patch, updatedAt: now };
     // A delayed heartbeat must never move durable activity backwards.
-    for (const key of ["lastHeartbeatAt", "lastActivityAt", "lastFileChangeAt", "lastTestAt", "updatedAt"] as const) {
+    for (const key of ["lastHeartbeatAt", "lastActivityAt", "lastFileChangeAt", "lastTestAt", "lastTestAttemptAt",
+      "lastSuccessfulValidationAt", "lastValidationFailureAt", "updatedAt"] as const) {
       if (current[key] && (!updated[key] || Date.parse(updated[key]!) < Date.parse(current[key]!))) updated[key] = current[key]!;
     }
     const result = this.database.sqlite.prepare(
-      `update orchestration_sessions set workspace_id = ?, session_kind = ?, external_session_id = ?, label = ?, state = ?, task = ?, last_heartbeat_at = ?, last_activity_at = ?, last_test_at = ?, last_file_change_at = ?, last_error_fingerprint = ?, consecutive_error_count = ?, updated_at = ?,
-       file_generation = ?, revision = revision + 1
+      `update orchestration_sessions set workspace_id = ?, session_kind = ?, external_session_id = ?, label = ?, state = ?, task = ?, last_heartbeat_at = ?, last_activity_at = ?, last_test_at = ?,
+       last_test_attempt_at = ?, last_successful_validation_at = ?, last_validation_failure_at = ?, last_validated_commit = ?, last_validated_tree = ?, last_validated_file_generation = ?,
+       last_file_change_at = ?, last_error_fingerprint = ?, consecutive_error_count = ?, updated_at = ?, file_generation = ?, revision = revision + 1
        where id = ? and revision = ? and incarnation = ?`
     ).run(
       updated.workspaceId ?? null,
@@ -245,6 +310,12 @@ export class OrchestrationStore {
       updated.lastHeartbeatAt ?? null,
       updated.lastActivityAt,
       updated.lastTestAt ?? null,
+      updated.lastTestAttemptAt ?? null,
+      updated.lastSuccessfulValidationAt ?? null,
+      updated.lastValidationFailureAt ?? null,
+      updated.lastValidatedCommit ?? null,
+      updated.lastValidatedTree ?? null,
+      updated.lastValidatedFileGeneration ?? null,
       updated.lastFileChangeAt ?? null,
       updated.lastErrorFingerprint ?? null,
       updated.consecutiveErrorCount,
@@ -353,6 +424,67 @@ export class OrchestrationStore {
       .get(sessionId, eventId) as EventRow | undefined;
     return row ? eventFromRow(row) : undefined;
   }
+
+  createTestRun(input: Omit<OrchestrationTestRun, "testRunId" | "revision">): OrchestrationTestRun {
+    const value: OrchestrationTestRun = {
+      ...input,
+      testRunId: "trun_" + randomUUID().replaceAll("-", "").slice(0, 20),
+      revision: 1,
+    };
+    this.database.sqlite.prepare(`insert into orchestration_test_runs
+      (id, project_key, session_id, process_session_id, revision, status, data_json, started_at, completed_at)
+      values (?, ?, ?, ?, 1, ?, ?, ?, ?)`)
+      .run(value.testRunId, value.projectKey, value.sessionId, value.processSessionId ?? null,
+        value.status, JSON.stringify(value), value.startedAt, value.completedAt ?? null);
+    return value;
+  }
+
+  getTestRun(sessionId: string, testRunId: string): OrchestrationTestRun | undefined {
+    const row = this.database.sqlite.prepare("select data_json from orchestration_test_runs where session_id = ? and id = ?")
+      .get(sessionId, testRunId) as { data_json: string } | undefined;
+    return row ? JSON.parse(row.data_json) as OrchestrationTestRun : undefined;
+  }
+
+  getTestRunByProcess(sessionId: string, processSessionId: string): OrchestrationTestRun | undefined {
+    const row = this.database.sqlite.prepare("select data_json from orchestration_test_runs where session_id = ? and process_session_id = ?")
+      .get(sessionId, processSessionId) as { data_json: string } | undefined;
+    return row ? JSON.parse(row.data_json) as OrchestrationTestRun : undefined;
+  }
+
+  updateTestRun(value: OrchestrationTestRun, expectedRevision: number): OrchestrationTestRun {
+    const next: OrchestrationTestRun = { ...value, revision: expectedRevision + 1 };
+    const result = this.database.sqlite.prepare(`update orchestration_test_runs
+      set process_session_id = ?, revision = ?, status = ?, data_json = ?, completed_at = ?
+      where id = ? and session_id = ? and revision = ? and status in ('started', 'running')`)
+      .run(next.processSessionId ?? null, next.revision, next.status, JSON.stringify(next), next.completedAt ?? null,
+        next.testRunId, next.sessionId, expectedRevision);
+    if (result.changes !== 1) throw new Error("TestRun revision or terminal-state conflict.");
+    return next;
+  }
+
+  insertEvidence(input: Omit<OrchestrationExecutionEvidence, "evidenceId">): OrchestrationExecutionEvidence {
+    const value: OrchestrationExecutionEvidence = {
+      ...input,
+      evidenceId: "evid_" + randomUUID().replaceAll("-", "").slice(0, 20),
+    };
+    this.database.sqlite.prepare(`insert into orchestration_execution_evidence
+      (id, project_key, session_id, test_run_id, data_json, created_at) values (?, ?, ?, ?, ?, ?)`)
+      .run(value.evidenceId, value.projectKey, value.sessionId, value.testRunId, JSON.stringify(value), value.completedAt);
+    return value;
+  }
+
+  getEvidence(projectKey: string, sessionId: string, evidenceId: string): OrchestrationExecutionEvidence | undefined {
+    const row = this.database.sqlite.prepare(`select data_json from orchestration_execution_evidence
+      where project_key = ? and session_id = ? and id = ?`).get(projectKey, sessionId, evidenceId) as { data_json: string } | undefined;
+    return row ? JSON.parse(row.data_json) as OrchestrationExecutionEvidence : undefined;
+  }
+
+  listTestRuns(sessionId: string, limit = 100): OrchestrationTestRun[] {
+    const rows = this.database.sqlite.prepare(`select data_json from orchestration_test_runs
+      where session_id = ? order by started_at desc, id desc limit ?`)
+      .all(sessionId, Math.max(1, Math.min(limit, 500))) as Array<{ data_json: string }>;
+    return rows.map(row => JSON.parse(row.data_json) as OrchestrationTestRun);
+  }
 }
 
 export function normalizeIntentPath(path: string): string {
@@ -376,6 +508,12 @@ function sessionFromRow(row: SessionRow): OrchestrationSession {
     lastHeartbeatAt: row.last_heartbeat_at ?? undefined,
     lastActivityAt: row.last_activity_at,
     lastTestAt: row.last_test_at ?? undefined,
+    lastTestAttemptAt: row.last_test_attempt_at ?? undefined,
+    lastSuccessfulValidationAt: row.last_successful_validation_at ?? undefined,
+    lastValidationFailureAt: row.last_validation_failure_at ?? undefined,
+    lastValidatedCommit: row.last_validated_commit ?? undefined,
+    lastValidatedTree: row.last_validated_tree ?? undefined,
+    lastValidatedFileGeneration: row.last_validated_file_generation ?? undefined,
     revision: row.revision,
     incarnation: row.incarnation,
     bindingGeneration: row.binding_generation,

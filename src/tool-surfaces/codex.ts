@@ -49,9 +49,12 @@ function processResult(snapshot: ProcessSnapshot): string {
 function processOutputSchema(): z.ZodRawShape {
   return resultOutputSchema({
     sessionId: z.number().optional(),
+    processSessionId: z.string(),
     running: z.boolean(),
     exitCode: z.number().int().optional(),
     signal: z.string().optional(),
+    cancelled: z.boolean(),
+    timedOut: z.boolean(),
     wallTimeMs: z.number().nonnegative(),
     outputTruncated: z.boolean(),
   });
@@ -65,9 +68,12 @@ function processToolResponse(snapshot: ProcessSnapshot) {
     structuredContent: {
       result,
       sessionId: snapshot.sessionId,
+      processSessionId: snapshot.processSessionId,
       running: snapshot.running,
       exitCode: snapshot.exitCode,
       signal: snapshot.signal,
+      cancelled: snapshot.cancelled,
+      timedOut: snapshot.timedOut,
       wallTimeMs: snapshot.wallTimeMs,
       outputTruncated: snapshot.outputTruncated,
     },
@@ -187,6 +193,13 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           .max(100_000)
           .optional()
           .describe("Approximate output token budget. Defaults to 10000."),
+        timeoutMs: z
+          .number()
+          .int()
+          .positive()
+          .max(86_400_000)
+          .optional()
+          .describe("Optional hard timeout in milliseconds. A timeout terminates the process and can never count as successful validation."),
       },
       outputSchema: processOutputSchema(),
       annotations: SHELL_TOOL_ANNOTATIONS,
@@ -200,6 +213,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       workingDirectory,
       yieldTimeMs,
       maxOutputTokens,
+      timeoutMs,
     }) => {
       const startedAt = performance.now();
       const desktopCommand = config.computerUseEnabled && process.platform === "win32"
@@ -229,8 +243,11 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           content: [textBlock(controlled.result)],
           structuredContent: {
             result: controlled.result,
+            processSessionId: "desktop-control",
             running: false,
             exitCode: 0,
+            cancelled: false,
+            timedOut: false,
             wallTimeMs: Math.round(performance.now() - startedAt),
             outputTruncated: false,
           },
@@ -263,6 +280,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
             rows,
             yieldTimeMs,
             maxOutputTokens,
+            timeoutMs,
           });
         },
       );

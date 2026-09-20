@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { resolveShellCommand, terminateProcessTree } from "./process-platform.js";
 
 const DEFAULT_EXEC_YIELD_MS = 10_000;
@@ -22,6 +23,7 @@ export interface StartCommandInput {
   rows?: number;
   yieldTimeMs?: number;
   maxOutputTokens?: number;
+  timeoutMs?: number;
 }
 
 export interface WriteStdinInput {
@@ -36,11 +38,14 @@ export interface WriteStdinInput {
 
 export interface ProcessSnapshot {
   sessionId?: number;
+  processSessionId: string;
   output: string;
   outputTruncated: boolean;
   running: boolean;
   exitCode?: number;
   signal?: string;
+  cancelled: boolean;
+  timedOut: boolean;
   wallTimeMs: number;
 }
 
@@ -52,6 +57,7 @@ interface ManagedProcess {
 
 interface ProcessSession {
   id: number;
+  processSessionId: string;
   workspaceId: string;
   process?: ManagedProcess;
   startedAt: number;
@@ -61,6 +67,9 @@ interface ProcessSession {
   running: boolean;
   exitCode?: number;
   signal?: string;
+  cancelled: boolean;
+  timedOut: boolean;
+  timeoutTimer?: NodeJS.Timeout;
   exitPromise: Promise<void>;
   resolveExit: () => void;
   cleanupTimer?: NodeJS.Timeout;
@@ -91,7 +100,7 @@ function processEnvironment(input?: {
   workspaceId?: string;
   workspaceRoot?: string;
 }): Record<string, string> {
-  return {
+  const env: Record<string, string> = {
     ...Object.fromEntries(
       Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
     ),
@@ -106,6 +115,10 @@ function processEnvironment(input?: {
     ...(input?.workspaceId ? { DEVSPACE_WORKSPACE_ID: input.workspaceId } : {}),
     ...(input?.workspaceRoot ? { DEVSPACE_WORKSPACE_ROOT: input.workspaceRoot } : {}),
   };
+  // DevSpace itself may be running under node:test. That runner marker must not
+  // make an exec_command child believe it is a recursive test invocation.
+  delete env.NODE_TEST_CONTEXT;
+  return env;
 }
 
 function codePointLength(value: string): number {
@@ -216,6 +229,7 @@ export class ProcessSessionManager {
   private readonly maxBufferCharacters: number;
   private readonly completedSessionTtlMs: number;
   private nextSessionId = 1;
+  private readonly incarnation = randomUUID();
 
   constructor(options: ProcessSessionManagerOptions = {}) {
     this.maxBufferCharacters = options.maxBufferCharacters ?? DEFAULT_BUFFER_CHARACTERS;
@@ -223,6 +237,12 @@ export class ProcessSessionManager {
   }
 
   async start(input: StartCommandInput): Promise<ProcessSnapshot> {
+    const timeoutMs = input.timeoutMs === undefined
+      ? undefined
+      : boundedInteger(input.timeoutMs, 0, 24 * 60 * 60_000);
+    if (timeoutMs !== undefined && timeoutMs < 1) {
+      throw new Error("Command timeout must be a positive duration.");
+    }
     const session = this.createSession(input);
     this.sessions.set(session.id, session);
 
@@ -232,6 +252,15 @@ export class ProcessSessionManager {
     } catch (error) {
       this.sessions.delete(session.id);
       throw error;
+    }
+
+    if (timeoutMs !== undefined) {
+      session.timeoutTimer = setTimeout(() => {
+        if (!session.running) return;
+        session.timedOut = true;
+        session.process?.kill("SIGTERM");
+      }, timeoutMs);
+      session.timeoutTimer.unref();
     }
 
     const yieldTimeMs = boundedInteger(input.yieldTimeMs, DEFAULT_EXEC_YIELD_MS, MAX_COMMAND_YIELD_MS);
@@ -259,6 +288,7 @@ export class ProcessSessionManager {
 
     const interruptRequested = chars.includes("\u0003") && session.running;
     if (interruptRequested) {
+      session.cancelled = true;
       session.process?.kill("SIGINT");
     }
     const writableChars = chars.replaceAll("\u0003", "");
@@ -278,13 +308,20 @@ export class ProcessSessionManager {
 
   terminate(workspaceId: string, sessionId: number): void {
     const session = this.getOwnedSession(workspaceId, sessionId);
-    if (session.running) session.process?.kill("SIGTERM");
+    if (session.running) {
+      session.cancelled = true;
+      session.process?.kill("SIGTERM");
+    }
   }
 
   shutdown(): void {
     for (const session of this.sessions.values()) {
       if (session.cleanupTimer) clearTimeout(session.cleanupTimer);
-      if (session.running) session.process?.kill("SIGTERM");
+      if (session.timeoutTimer) clearTimeout(session.timeoutTimer);
+      if (session.running) {
+        session.cancelled = true;
+        session.process?.kill("SIGTERM");
+      }
     }
     this.sessions.clear();
   }
@@ -309,14 +346,18 @@ export class ProcessSessionManager {
       resolveExit = resolve;
     });
 
+    const id = this.nextSessionId++;
     return {
-      id: this.nextSessionId++,
+      id,
+      processSessionId: this.incarnation + ":" + id,
       workspaceId: input.workspaceId,
       startedAt: Date.now(),
       columns: terminalSize(input.columns, DEFAULT_COLUMNS),
       rows: terminalSize(input.rows, DEFAULT_ROWS),
       buffer: new HeadTailBuffer(this.maxBufferCharacters),
       running: true,
+      cancelled: false,
+      timedOut: false,
       exitPromise,
       resolveExit,
     };
@@ -389,6 +430,7 @@ export class ProcessSessionManager {
     session.running = false;
     session.exitCode = exitCode;
     session.signal = signal;
+    if (session.timeoutTimer) clearTimeout(session.timeoutTimer);
     session.resolveExit();
     session.cleanupTimer = setTimeout(
       () => this.sessions.delete(session.id),
@@ -408,11 +450,14 @@ export class ProcessSessionManager {
 
     return {
       sessionId: session.running ? session.id : undefined,
+      processSessionId: session.processSessionId,
       output: buffered.output,
       outputTruncated: buffered.truncated,
       running: session.running,
       exitCode: session.exitCode,
       signal: session.signal,
+      cancelled: session.cancelled,
+      timedOut: session.timedOut,
       wallTimeMs: Date.now() - session.startedAt,
     };
   }

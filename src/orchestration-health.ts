@@ -52,8 +52,11 @@ export function deriveOrchestrationHealth(
 
   if (session.lastFileChangeAt) {
     const fileMs = Date.parse(session.lastFileChangeAt);
-    const testMs = session.lastTestAt ? Date.parse(session.lastTestAt) : Number.NEGATIVE_INFINITY;
-    if (fileMs > testMs) signals.push("unverified_changes");
+    const validationMs = session.lastSuccessfulValidationAt
+      ? Date.parse(session.lastSuccessfulValidationAt)
+      : session.lastTestAt ? Date.parse(session.lastTestAt) : Number.NEGATIVE_INFINITY;
+    const generationDirty = (session.fileGeneration ?? 0) > (session.lastValidatedFileGeneration ?? 0);
+    if (generationDirty || fileMs > validationMs) signals.push("unverified_changes");
   }
 
   const primary = choosePrimary(signals);

@@ -54,7 +54,7 @@ export function registerOrchestrationV2Tools(server: McpServer, v2: Orchestratio
     (p, a) => v2.integrations.get(p, a.integrationId));
   register("integration_list", "List project integration records with bounded cursor pagination.", page, true,
     (p, a) => v2.integrations.list(p, a.limit, a.after));
-  register("integration_update", "CAS update of explicit review/evidence metadata. Test evidence references durable test_run events and the tested commit. Invalidates previous gates.",
+  register("integration_update", "CAS update of explicit review/evidence metadata. Evidence IDs must refer to execution-issued validation evidence in the bound session; callers cannot pair arbitrary events with commits. Invalidates previous gates.",
     { integrationId: id, expectedRevision: revision, ...integrationUpdateSchema.shape }, false,
     (p, a) => v2.integrations.update(p, a.integrationId, a.expectedRevision, a));
   register("integration_gate", "Read actual Git state and evaluate gates; persist the review snapshot only. No project writes or Git integration operations.",

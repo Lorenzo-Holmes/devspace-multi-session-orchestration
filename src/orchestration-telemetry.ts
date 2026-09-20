@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute, relative } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OrchestrationRegistry } from "./orchestration-registry.js";
@@ -8,6 +8,10 @@ import {
 } from "./orchestration-scope.js";
 import { openAiConversationScopeId } from "./request-meta.js";
 import type { WorkspaceRegistry } from "./workspaces.js";
+import { observeValidationTree } from "./integration-merge-probe.js";
+import { hasPositiveValidationReceipt, identifyValidationCommand } from "./orchestration-validation.js";
+
+const TELEMETRY_ISSUER = "devspace-observed:" + randomUUID();
 
 const FILE_MUTATION_TOOLS = new Set([
   "apply_patch",
@@ -48,6 +52,9 @@ export function installOrchestrationTelemetry(
       let scope = conversationId
         ? telemetryScopeFromArgs(args, conversationId, registry, workspaces)
         : undefined;
+      const pendingValidation = scope
+        ? await beginObservedValidation(registry, workspaces, scope.sessionId, name, args)
+        : undefined;
 
       try {
         const result = await callback(args, extra);
@@ -60,11 +67,15 @@ export function installOrchestrationTelemetry(
           );
         }
         if (scope) {
+          await finishObservedValidation(registry, workspaces, scope.sessionId, name, args, result, pendingValidation);
           recordObservedToolResult(registry, scope.sessionId, name, args, result);
         }
         return result;
       } catch (error) {
         if (scope) {
+          if (pendingValidation) {
+            try { registry.finishUnboundTestRun(scope.sessionId, pendingValidation.testRunId, "tool_callback_failed"); } catch { /* no authority is inferred */ }
+          }
           recordObservedError(registry, scope.sessionId, name, error, args);
         }
         throw error;
@@ -129,6 +140,109 @@ function ensureAutomaticSession(
   }
 }
 
+interface PendingValidation {
+  testRunId: string;
+}
+
+async function beginObservedValidation(
+  registry: OrchestrationRegistry,
+  workspaces: WorkspaceRegistry,
+  sessionId: string,
+  tool: string,
+  args: unknown,
+): Promise<PendingValidation | undefined> {
+  if (tool !== "exec_command" || !isRecord(args) || typeof args.workspaceId !== "string") return undefined;
+  const command = observedCommand(args);
+  if (!command) return undefined;
+  try {
+    const workspace = workspaces.getWorkspace(args.workspaceId);
+    const cwd = workspaces.resolveWorkingDirectory(workspace,
+      typeof args.workingDirectory === "string" ? args.workingDirectory : undefined);
+    const definition = await identifyValidationCommand(command, cwd);
+    if (!definition) return undefined;
+    const source = await observeValidationTree(workspace.root).catch(() => undefined);
+    const environmentIdentity = createHash("sha256").update(JSON.stringify({
+      node: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      executable: process.execPath,
+      path: process.env.PATH ?? process.env.Path ?? "",
+    })).digest("hex");
+    const run = registry.beginTestRun(sessionId, {
+      kind: definition.kind,
+      checkDefinition: definition.checkDefinition,
+      requiresTestCount: definition.requiresTestCount,
+      command,
+      workingDirectory: cwd,
+      testedCommit: source?.commit,
+      testedTree: source?.tree,
+      environmentIdentity,
+      issuer: TELEMETRY_ISSUER,
+    });
+    return { testRunId: run.testRunId };
+  } catch {
+    return undefined;
+  }
+}
+
+async function finishObservedValidation(
+  registry: OrchestrationRegistry,
+  workspaces: WorkspaceRegistry,
+  sessionId: string,
+  tool: string,
+  args: unknown,
+  result: unknown,
+  pending?: PendingValidation,
+): Promise<void> {
+  try {
+    const observation = processObservation(result);
+    let run = pending ? undefined : observation.processSessionId
+      ? registry.testRunByProcess(sessionId, observation.processSessionId)
+      : undefined;
+    if (tool === "exec_command" && pending) {
+      if (!observation.processSessionId) {
+        registry.finishUnboundTestRun(sessionId, pending.testRunId, "process_identity_missing");
+        return;
+      }
+      run = registry.bindTestRunProcess(sessionId, pending.testRunId, observation.processSessionId);
+    }
+    if (!run || observation.running || !observation.processSessionId) return;
+    const session = registry.get(sessionId);
+    const after = await observeValidationTree(session.workspaceRoot).catch(() => undefined);
+    const sourceStable = Boolean(after && run.testedCommit === after.commit && run.testedTree === after.tree);
+    const definition = { kind: run.kind, checkDefinition: run.checkDefinition, requiresTestCount: run.requiresTestCount };
+    const positiveReceipt = hasPositiveValidationReceipt(definition, resultText(result));
+    registry.finishTestRun(sessionId, observation.processSessionId, {
+      exitCode: observation.exitCode,
+      signal: observation.signal,
+      cancelled: observation.cancelled,
+      timedOut: observation.timedOut,
+      sourceStable,
+      positiveReceipt,
+      reason: isRecord(result) && result.isError === true ? "tool_error_result" : undefined,
+    });
+  } catch {
+    // Validation telemetry is fail-closed and cannot change primary tool behavior.
+  }
+}
+
+function processObservation(result: unknown): {
+  processSessionId?: string; running: boolean; exitCode?: number; signal?: string; cancelled: boolean; timedOut: boolean;
+} {
+  if (!isRecord(result) || !isRecord(result.structuredContent)) {
+    return { running: false, cancelled: false, timedOut: false };
+  }
+  const content = result.structuredContent;
+  return {
+    processSessionId: typeof content.processSessionId === "string" ? content.processSessionId : undefined,
+    running: content.running === true,
+    exitCode: typeof content.exitCode === "number" ? content.exitCode : undefined,
+    signal: typeof content.signal === "string" ? content.signal : undefined,
+    cancelled: content.cancelled === true,
+    timedOut: content.timedOut === true,
+  };
+}
+
 export function recordObservedToolResult(
   registry: OrchestrationRegistry,
   sessionId: string,
@@ -141,22 +255,6 @@ export function recordObservedToolResult(
     registry.heartbeat(sessionId, {
       detail: { source: "automatic_tool", tool, failed },
     });
-
-    const command = observedCommand(args);
-    if (command && looksLikeValidationCommand(command)) {
-      registry.recordEvent({
-        sessionId,
-        kind: "test_run",
-        detail: failed
-          ? {
-              tool,
-              passed: false,
-              fingerprint: errorFingerprint(tool, resultText(result)),
-            }
-          : { tool, passed: true },
-      });
-      return;
-    }
 
     if (FILE_MUTATION_TOOLS.has(tool)) {
       const facts = observedMutationFacts(result);
@@ -266,10 +364,6 @@ function observedCommand(args: unknown): string | undefined {
   if (typeof args.cmd === "string") return args.cmd;
   if (typeof args.command === "string") return args.command;
   return undefined;
-}
-
-function looksLikeValidationCommand(command: string): boolean {
-  return /(?:^|\s)(?:pytest|jest|vitest|mocha|tsc)(?:\s|$)|node\s+--test(?:\s|$)|tsx(?:\.cmd)?(?:\s+\S+)*\s+--test(?:\s|$)|npm\s+(?:run\s+)?(?:test|build)(?:\s|$)|pnpm\s+(?:run\s+)?(?:test|build)(?:\s|$)|yarn\s+(?:test|build)(?:\s|$)|vite\s+build(?:\s|$)/i.test(command);
 }
 
 function errorFingerprint(tool: string, detail: string): string {

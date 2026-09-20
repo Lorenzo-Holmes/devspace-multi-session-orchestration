@@ -61,6 +61,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 18, name: "automation-due-work-v2" },
       { version: 19, name: "session-cas-and-mutation-generation" },
       { version: 20, name: "workspace-approval-reservations-and-config-journal" },
+      { version: 21, name: "trusted-validation-evidence" },
     ]);
   } finally {
     database.close();

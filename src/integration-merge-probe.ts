@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { lstat, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readlink, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -33,6 +34,12 @@ export interface MergeProbeResult {
   diffReady: boolean;
   policy: typeof MERGE_POLICY;
   errorCode?: string;
+}
+
+export interface ValidationTreeObservation {
+  commit: string;
+  tree: string;
+  dirty: boolean;
 }
 
 function environment(isolated = false): NodeJS.ProcessEnv {
@@ -84,6 +91,39 @@ async function directory(path: string): Promise<string> {
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("invalid_worktree");
   return realpath(path);
+}
+
+/** Read-only source identity. Dirty trees use a raw-byte digest and are never
+ * confused with an immutable Git tree OID. */
+export async function observeValidationTree(root: string): Promise<ValidationTreeObservation> {
+  const canonical = await directory(root);
+  if (await usesSourceFilter(canonical)) throw new Error("unsupported_source_filter");
+  const commit = await git(canonical, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  const committedTree = await git(canonical, ["rev-parse", "HEAD^{tree}"]);
+  const status = await git(canonical, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  if (!status) return { commit, tree: committedTree, dirty: false };
+  const names = (await git(canonical, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]))
+    .split("\0").filter(Boolean).sort();
+  if (names.length > 100_000) throw new Error("validation_tree_too_large");
+  const digest = createHash("sha256").update("devspace-working-tree-v1\0");
+  let total = 0;
+  for (const name of names) {
+    if (name.startsWith("/") || name.split("/").includes("..")) throw new Error("invalid_git_path");
+    const path = join(canonical, name);
+    const info = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    digest.update(JSON.stringify(name)).update("\0");
+    if (!info) { digest.update("deleted\0"); continue; }
+    if (info.isSymbolicLink()) { digest.update("symlink\0").update(await readlink(path)).update("\0"); continue; }
+    if (!info.isFile()) throw new Error("unsupported_validation_path");
+    total += info.size;
+    if (total > 128 * 1024 * 1024) throw new Error("validation_tree_too_large");
+    const content = await readFile(path);
+    digest.update("file\0").update(String(info.mode & 0o111)).update("\0").update(content);
+  }
+  return { commit, tree: "working-tree-sha256:" + digest.digest("hex"), dirty: true };
 }
 
 export async function observeMergeInputs(input: MergeProbeInput): Promise<MergeObservation> {
