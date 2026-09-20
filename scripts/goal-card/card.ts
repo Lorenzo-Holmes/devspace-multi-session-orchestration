@@ -22,6 +22,7 @@ function render(){
     :remaining===0?"等待时间已到，按钮已锁定。请保留当前状态。"
     :s.waitActive?`服务端已确认等待，保守估算剩余约 ${remaining} 秒。请点击一次选项。`
     :"尚未确认等待开始；可提前选择，答案会暂存。";
+  (element("status") as HTMLElement).dataset.tone = s.waitOutcome === "answer_received" || s.waitOutcome === "answer_already_recorded" || s.acknowledged ? "success" : "neutral";
 }
 function accept(result:CallToolResult){
   if(result.isError)throw new Error(result.content.filter(c=>c.type==="text").map(c=>c.text).join("\n"));
@@ -70,7 +71,8 @@ app.ontoolresult=result=>{
       const choices=snapshot?.choices;
       if(!Array.isArray(choices)||choices.length<2||choices.length>6||choices.some(c=>typeof c!=="string"))throw new Error("选项格式无效。");
       for(const choice of [...choices,"取消并暂停"]){const button=document.createElement("button");button.textContent=choice;button.disabled=true;
-        const index=buttons.length;button.addEventListener("click",()=>void submit(index===choices.length?"cancel":"accept",index===choices.length?undefined:choice));
+        const index=buttons.length;button.className=index===choices.length?"ds-button ds-button-danger":"ds-button ds-button-primary";
+        button.addEventListener("click",()=>void submit(index===choices.length?"cancel":"accept",index===choices.length?undefined:choice));
         buttons.push(button);element("choices").append(button);}
     }
     void sync();

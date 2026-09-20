@@ -18,6 +18,9 @@ function render(){
   if(expired&&!snapshot.decision)stopped=true;
   allow.disabled=deny.disabled=stopped||busy||attempted||!snapshot.canSubmit||expired;
   el("receipt").textContent=JSON.stringify(snapshot,null,2);
+  const risk=el("risk");
+  risk.textContent=snapshot.riskLevel==="high"?"High risk":snapshot.riskLevel==="low"?"Standard risk":"Unknown risk";
+  risk.dataset.tone=snapshot.riskLevel==="high"||snapshot.riskLevel==="unknown"?"danger":"warning";
   if(stopped){
     if(expired&&!snapshot.decision)el("status").textContent="本次批准请求已过期。请让原操作生成新的批准卡。";
     return;
@@ -28,6 +31,7 @@ function render(){
     :snapshot.waitOutcome==="timeout"?`模型等待已结束，但批准卡仍有效约 ${Math.ceil(remainingMs()/1000)} 秒。你仍可明确允许或拒绝；允许后发送“继续”。`
     :snapshot.waitOutcome?`本次批准等待已结束（${snapshot.waitOutcome}）。`
     :"请选择一次。只有你点击“允许本次访问”后，原 Computer Use 操作才可重试。";
+  el("status").dataset.tone=snapshot.waitOutcome==="accepted"?"success":snapshot.waitOutcome==="declined"?"danger":"neutral";
 }
 function accept(result:CallToolResult){
   if(result.isError)throw new Error(result.content.filter(c=>c.type==="text").map(c=>c.text).join("\n"));
@@ -66,6 +70,7 @@ app.ontoolresult=result=>{
     accept(result);el("id").textContent=`本次批准：${card.approvalId}`;
     el("app").textContent=String(snapshot?.displayName??snapshot?.app??"未知应用");
     el("message").textContent=String(snapshot?.message??"");
+    el("scope").textContent=`工作区 ${String(snapshot?.workspaceId??"—")} · ${String(snapshot?.app??"当前应用")} · 当前 OAuth 客户端`;
   }catch(e){stopped=true;el("status").textContent=errorText(e);render();}
 };
 window.addEventListener("pagehide",()=>{stopped=true;clearTimeout(initial);if(expiryTimer!==undefined)clearInterval(expiryTimer);});
