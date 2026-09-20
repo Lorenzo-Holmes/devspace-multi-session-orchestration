@@ -21,12 +21,13 @@ after every rebase.
       not sufficient evidence for this last case.
 - [ ] Wire conservative A3 approval-operation recovery into canonical runtime
       lifecycle where external persistence can remain uncertain.
-- [ ] Re-run old-DB → migration-22 upgrade, restart idempotence and migration
+- [x] Re-run old-DB → migration-22 upgrade, restart idempotence and migration
       failure rollback.
-- [ ] Re-run TestRun/Evidence false-positive matrix, attempt/worker fencing,
+- [x] Re-run TestRun/Evidence false-positive matrix, attempt/worker fencing,
       worktree crash phases, 501/1001/5000 reconciliation and merge simulation.
-- [ ] Full `pnpm test`, `pnpm typecheck`, `pnpm build`, `git diff --check` green in
-      CI on all supported OS lanes.
+- [x] Exact-head `9543127` GitHub Smoke is green on ubuntu, macOS and Windows for
+      install, typecheck, test, build and Doctor. Local full test is 370 total /
+      357 pass / 0 fail / 13 skip; `git diff --check` also passes. SKIP remains SKIP.
 
 ## G — Runtime resilience gate (PR #4)
 
@@ -75,7 +76,7 @@ after every rebase.
 
 ## E — Auto Session Rollover gate (PR #2, stacked on A)
 
-- [ ] Rebase onto latest A (currently 9 A-only commits behind).
+- [ ] Rebase onto latest A (currently 13 A-only commits behind).
 - [ ] After A merges, retarget PR #2 from A to `main`.
 - [ ] Implement durable ConversationEpoch and RolloverAttempt journal.
 - [ ] Extend canonical handoff for context/recovery rollover; do not create a
