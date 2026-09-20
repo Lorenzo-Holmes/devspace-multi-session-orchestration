@@ -33,8 +33,11 @@ its two commits above main changed CI only. Main was
   retain `recovery_uncertain` when an external writer's final state cannot be established.
 - A14: canonical containment is substantially improved, but external concurrent
   directory replacement is not a handle-level proof on the current Node filesystem API.
-- A16: full multi-process, crash and resource-exhaustion campaigns; current tests are
-  focused regression tests, not a complete adversarial acceptance certificate.
+- A16: a real two-process SQLite claim race now verifies that only one current
+  execution attempt can win. Existing suites also cover 5,000-row reconciliation,
+  stale lease/evidence/delivery/worker fencing and crash-shaped worktree phases.
+  Full real process-kill plus broader resource-exhaustion campaigns remain for H/J;
+  these focused tests are not a complete adversarial acceptance certificate.
 
 Automatic rollover must remain disabled until the remaining identity, crash-recovery,
 containment and adversarial reliability prerequisites plus real-browser safety

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { openDatabase } from "./db/client.js";
 import { CoordinatorStore } from "./coordinator-store.js";
 import { OrchestrationCoordinator } from "./orchestration-coordinator.js";
@@ -11,6 +13,7 @@ import { OrchestrationRegistry } from "./orchestration-registry.js";
 
 const now = "2026-09-19T01:00:00.000Z";
 const future = "2026-09-19T01:10:00.000Z";
+const exec = promisify(execFile);
 
 for (const historyCount of [500, 1000, 5000]) {
   test(`ready scheduling sees pending and expired tasks beyond ${historyCount} history rows`, async (t) => {
@@ -67,4 +70,40 @@ test("SQL claim guards reject active leases, wrong-project owners, terminal task
   const completed = store.completeClaim({ taskId: "task", expectedRevision: reclaimed.revision,
     ownerSessionId: owner.id, leaseToken: "second", now: future });
   assert.throws(() => store.updateClaim({ ...claim, expectedRevision: completed.revision }), /revision conflict/);
+});
+
+test("two independent Node processes cannot create two current execution attempts", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "devspace-multiprocess-claim-"));
+  const sessions = new OrchestrationRegistry(new OrchestrationStore(dir));
+  const store = new CoordinatorStore(dir);
+  const ownerA = sessions.register({ id: "process-owner-a", projectKey: "p", workspaceRoot: dir, state: "running" });
+  const ownerB = sessions.register({ id: "process-owner-b", projectKey: "p", workspaceRoot: dir, state: "running" });
+  store.createPlan("p", [{ id: "task", name: "task", description: "race", priority: 0, dependencies: [] }], now);
+  store.close(); sessions.close();
+  t.after(async () => rm(dir, { recursive: true, force: true }));
+
+  const child = join(import.meta.dirname, "test-support", "coordinator-claim-child.ts");
+  const invoke = (sessionId: string) => exec(process.execPath, ["--import", "tsx", child, dir, "task", sessionId, now],
+    { timeout: 20_000, windowsHide: true, maxBuffer: 256 * 1024 })
+    .then(result => ({ exitCode: 0, stdout: result.stdout }), error => ({
+      exitCode: typeof error?.code === "number" ? error.code : -1,
+      stdout: String(error?.stdout ?? ""),
+    }));
+  const [a, b] = await Promise.all([invoke(ownerA.id), invoke(ownerB.id)]);
+  const receipts = [a, b].map(result => ({ ...result,
+    receipt: JSON.parse(result.stdout.trim()) as { ok: boolean; attemptId?: string } }));
+  assert.equal(receipts.filter(result => result.receipt.ok).length, 1);
+  assert.equal(receipts.filter(result => !result.receipt.ok).length, 1);
+
+  const reopenedSessions = new OrchestrationRegistry(new OrchestrationStore(dir));
+  const reopenedStore = new CoordinatorStore(dir);
+  try {
+    const task = reopenedStore.getTask("task")!;
+    assert.equal(task.state, "claimed");
+    assert.equal(task.leaseGeneration, 1);
+    assert.ok(task.attemptId);
+    assert.ok(task.ownerWorkerIncarnationId);
+    assert.equal([ownerA.id, ownerB.id].includes(task.ownerSessionId!), true);
+    assert.equal(receipts.some(result => result.receipt.attemptId === task.attemptId), true);
+  } finally { reopenedStore.close(); reopenedSessions.close(); }
 });
