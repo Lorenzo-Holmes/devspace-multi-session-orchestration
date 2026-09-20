@@ -47,7 +47,31 @@ color alone; text remains authoritative.
 `src/card-visual-contract.test.ts` locks shared tokens, accessibility hooks,
 responsive/reduced-motion rules, approval information hierarchy and build-time
 stylesheet injection. `pnpm build:chat-card` verifies that all four cards remain
-self-contained under their existing CSP. The repository contains no Playwright
-fixture or dependency, and the advertised external Playwright skill could not be
-read through the current DevSpace allowed-root boundary, so screenshot-based
-visual regression is recorded as not run rather than claimed as passing.
+self-contained under their existing CSP.
+
+On 2026-09-20 the external Playwright CLI skill was available and was exercised
+against the packaged diagnostic card through a loopback-only static server. The
+real browser loaded `chat-card-probe.html`, produced an accessibility snapshot,
+and captured viewport screenshots at 1280×900 light, 1280×900 dark and 360×800
+dark. The snapshot exposed the expected heading, read-only badge, fail-closed
+status region, disabled actions and diagnostic details. The three screenshot
+commands completed successfully. These are runtime QA artifacts, not committed
+golden images, so this is a focused visual smoke check rather than pixel-diff
+regression coverage for every state.
+
+An additional attempt to inspect the same browser via DevSpace Browser Use was
+BLOCKED by the local CUA runtime (`windows sandbox ... timed out connecting
+runner pipe-in`). It is not counted as a pass and no desktop-control fallback was
+used. Remaining visual coverage gaps are populated Goal/Approval/Supervisor
+states, explicit loading state and deterministic cross-platform screenshot
+baselines.
+
+Validation for branch head `a33f54a`:
+
+- `pnpm install --frozen-lockfile`: PASS
+- `pnpm typecheck`: PASS
+- `src/card-visual-contract.test.ts`: PASS, 3/3, 0 skipped
+- `pnpm build:chat-card`: PASS
+- `pnpm build`: PASS (existing large-chunk warning only)
+- Playwright diagnostic light/dark/narrow smoke: PASS
+- DevSpace Browser Use screenshot parity: BLOCKED by local CUA runtime
